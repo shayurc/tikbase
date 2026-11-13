@@ -55,6 +55,8 @@ at+qIxUCMG1mihDK1A3UT82NQz60imOlM27jbdoXt2QfyFMm+YhidDkLF1vLUagM
 const OID_WWDR_INTERMEDIATE = Buffer.from('060a2a864886f76364060201', 'hex');
 const OID_RECEIPT_SIGNING = Buffer.from('060a2a864886f76364060b01', 'hex');
 
+export const MAX_JWS_LENGTH = 200_000;
+
 export class AppleJwsError extends Error {
   constructor(message: string) {
     super(message);
@@ -82,7 +84,12 @@ function validAt(cert: X509Certificate, when: number): boolean {
  * anything that is not a genuine, intact Apple signature.
  */
 export function verifyAppleJws<T = Record<string, unknown>>(jws: unknown, opts: VerifyOptions = {}): T {
-  if (typeof jws !== 'string' || jws.length > 20_000) throw new AppleJwsError('not a JWS');
+  // The cap only exists to refuse absurd input before parsing it. It has to be
+  // generous: a server notification carries its own certificate chain plus two
+  // nested JWS that each carry the chain again, base64'd a second time, which
+  // comes to roughly 28,000 characters. The first version of this line said
+  // 20,000 and would have answered 400 to every real notice.
+  if (typeof jws !== 'string' || jws.length > MAX_JWS_LENGTH) throw new AppleJwsError('not a JWS');
   const parts = jws.split('.');
   if (parts.length !== 3 || parts.some((p) => !p)) throw new AppleJwsError('not a JWS');
 

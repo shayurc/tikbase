@@ -161,8 +161,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // the authenticated owner of the account — this endpoint already derives
     // the user from a verified token, so there is nobody else to leak it to.
     const referral = (data.user.user_metadata as Record<string, any> | null)?.referral;
+    // Where the plan is managed, so a client does not send an Apple subscriber
+    // to the Stripe portal (which has no customer for them and fails).
+    const stripePaid = !!sub?.status && ACTIVE_STATUSES.has(sub.status);
     return res.json({
       isPaid,
+      ...(isPaid ? { source: stripePaid ? 'stripe' : 'apple' } : {}),
       ...(referral?.code
         ? {
             referral: {

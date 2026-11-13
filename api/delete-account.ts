@@ -25,13 +25,19 @@ export const CONFIRM_WORD = 'DELETE';
 export type DeleteDecision =
   | { ok: true }
   | { ok: false; status: 400 | 409; error: string; message: string };
+// error 'apple_subscription_active' can be answered by sending the request
+// again with acknowledge_subscription: true. 'subscription_active' cannot.
 
 /** Whether this account may be deleted right now. Pure, so it is tested. */
 export function deletionDecision(input: {
   confirm: unknown;
   subscriptionStatus: string | null | undefined;
+  /** The Stripe plan is already set to end at the close of the paid period. */
+  cancelAtPeriodEnd?: boolean;
   /** A live subscription bought in the iPhone app. Optional for old callers. */
   appleActive?: boolean;
+  /** The person has been told Apple keeps billing and chose to delete anyway. */
+  acknowledgeSubscription?: unknown;
 }): DeleteDecision {
   if (input.confirm !== CONFIRM_WORD) {
     return {
@@ -41,7 +47,15 @@ export function deletionDecision(input: {
       message: `Type ${CONFIRM_WORD} to confirm.`,
     };
   }
-  if (input.subscriptionStatus && ACTIVE_STATUSES.has(input.subscriptionStatus)) {
+  // A plan already cancelled and running out its paid period is not going to
+  // charge anyone again, so it must not hold the account hostage: Stripe keeps
+  // status 'active' until the period ends, which on its own blocked deletion
+  // for up to a month after the customer had cancelled.
+  if (
+    input.subscriptionStatus &&
+    ACTIVE_STATUSES.has(input.subscriptionStatus) &&
+    !input.cancelAtPeriodEnd
+  ) {
     return {
       ok: false,
       status: 409,
@@ -50,16 +64,21 @@ export function deletionDecision(input: {
         'You have an active subscription. Cancel it in Billing first, then delete your account.',
     };
   }
-  // Same reasoning for Apple, with one difference that changes the wording:
-  // we cannot cancel an Apple subscription for anyone, and neither can our
-  // Billing page. Only the customer can, in their Apple Account settings.
-  if (input.appleActive) {
+  // Apple is different, in two ways. We cannot cancel an Apple subscription
+  // for anyone and cannot see that it has been cancelled until the paid period
+  // runs out, so "cancel first" would mean waiting up to a month. And Apple's
+  // account-deletion rule (guideline 5.1.1(v), "Offering account deletion in
+  // your app", read 2026-11-13) says to tell the person that billing continues
+  // through Apple and ask them to cancel, while still offering to delete
+  // immediately; an app that makes deletion unnecessarily difficult fails
+  // review. So: say it once, then honour the second request.
+  if (input.appleActive && input.acknowledgeSubscription !== true) {
     return {
       ok: false,
       status: 409,
-      error: 'subscription_active',
+      error: 'apple_subscription_active',
       message:
-        'You have an active subscription through the iPhone app. Cancel it in your Apple Account settings (Settings, your name, Subscriptions), then delete your account once it has ended.',
+        'Your TikBase Pro subscription is billed by Apple and will keep renewing after your account is deleted. Cancel it in your Apple Account settings (Settings, your name, Subscriptions). You can delete your account now or after cancelling.',
     };
   }
   return { ok: true };
@@ -99,7 +118,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const decision = deletionDecision({
       confirm: (req.body ?? {}).confirm,
       subscriptionStatus: (data.user.app_metadata as any)?.subscription?.status,
+      cancelAtPeriodEnd: (data.user.app_metadata as any)?.subscription?.cancel_at_period_end === true,
       appleActive: appleRecordActive((data.user.app_metadata as any)?.apple_subscription),
+      acknowledgeSubscription: (req.body ?? {}).acknowledge_subscription,
     });
     if (!decision.ok) {
       return res.status(decision.status).json({ error: decision.error, message: decision.message });

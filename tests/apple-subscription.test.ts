@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { X509Certificate } from 'node:crypto';
-import { verifyAppleJws, AppleJwsError, APPLE_ROOT_CA_G3_PEM } from '../api/_lib/apple-jws';
+import { verifyAppleJws, AppleJwsError, APPLE_ROOT_CA_G3_PEM, MAX_JWS_LENGTH } from '../api/_lib/apple-jws';
 import {
   checkTransaction,
   recordFromTransaction,
@@ -20,11 +20,18 @@ import { deletionDecision } from '../api/delete-account';
 import { forcedStatus } from '../api/apple-notifications';
 import { makeChain, signJws } from './apple-chain';
 
-const NOW = Date.parse('2026-11-13T12:00:00Z');
 const DAY = 86_400_000;
 const USER = '3f2b8a1e-9c4d-4e6f-8a7b-1c2d3e4f5a6b';
 
+// Every chain is minted first and NOW is taken from the clock afterwards.
+// The certificates are valid from the moment openssl makes them, so a fixed
+// NOW (this file first said noon on 2026-11-13) passes until the clock reaches
+// it and fails for ever after: "certificate not valid at signing time".
 const chain = makeChain();
+const otherChain = makeChain();
+const noLeafMarker = makeChain({ leafOid: false });
+const noIntermediateMarker = makeChain({ intermediateOid: false });
+const NOW = Date.now() + 5_000;
 const trust = { trustedRoots: [chain.rootPem], now: NOW };
 
 function rejects(fn: () => unknown, pattern: RegExp) {
@@ -62,27 +69,25 @@ test('a payload changed after signing is refused', () => {
 });
 
 test('a receipt signed by a key other than the leaf certificate is refused', () => {
-  const other = makeChain();
-  const jws = signJws(chain, { signedDate: NOW }, { keyPem: other.leafKeyPem });
+  const jws = signJws(chain, { signedDate: NOW }, { keyPem: otherChain.leafKeyPem });
   rejects(() => verifyAppleJws(jws, trust), /bad signature/);
 });
 
 test('a leaf from a different issuer spliced under the trusted root is refused', () => {
-  const other = makeChain();
-  const jws = signJws(other, { signedDate: NOW }, { x5c: [other.x5c[0], chain.x5c[1], chain.x5c[2]] });
+  const jws = signJws(otherChain, { signedDate: NOW }, { x5c: [otherChain.x5c[0], chain.x5c[1], chain.x5c[2]] });
   rejects(() => verifyAppleJws(jws, trust), /bad leaf/);
 });
 
 test('a leaf without the receipt-signing marker is refused', () => {
   // The case that matters most: a certificate Apple really issued, for
   // something other than signing receipts.
-  const c = makeChain({ leafOid: false });
+  const c = noLeafMarker;
   const jws = signJws(c, { signedDate: NOW });
   rejects(() => verifyAppleJws(jws, { trustedRoots: [c.rootPem], now: NOW }), /not a receipt signer/);
 });
 
 test('an intermediate without the Apple WWDR marker is refused', () => {
-  const c = makeChain({ intermediateOid: false });
+  const c = noIntermediateMarker;
   const jws = signJws(c, { signedDate: NOW });
   rejects(() => verifyAppleJws(jws, { trustedRoots: [c.rootPem], now: NOW }), /not Apple WWDR/);
 });
@@ -110,8 +115,16 @@ test('a receipt dated before the certificates existed is refused', () => {
   rejects(() => verifyAppleJws(jws, trust), /not valid at signing time/);
 });
 
+test('a payload the size of a real server notification is not refused for its length', () => {
+  // A notification nests two more JWS, each with its own chain: about 28,000
+  // characters. Built here at 40,000 to leave room.
+  const jws = signJws(chain, { signedDate: NOW - 1000, data: { signedTransactionInfo: 'x'.repeat(30_000) } });
+  assert.ok(jws.length > 40_000);
+  assert.equal((verifyAppleJws(jws, trust) as any).data.signedTransactionInfo.length, 30_000);
+});
+
 test('junk is refused without throwing anything else', () => {
-  for (const junk of [undefined, null, 42, '', 'a.b', 'a.b.c', '..', 'x'.repeat(30_000)]) {
+  for (const junk of [undefined, null, 42, '', 'a.b', 'a.b.c', '..', 'x'.repeat(MAX_JWS_LENGTH + 1)]) {
     assert.throws(() => verifyAppleJws(junk as any, trust), AppleJwsError);
   }
 });
@@ -226,10 +239,32 @@ test('an account is Pro through Stripe, through Apple, or both; otherwise free',
   assert.equal(hasPaidAccess(null, NOW), false);
 });
 
-test('account deletion is refused while an Apple subscription is live, and says where to cancel', () => {
-  const d = deletionDecision({ confirm: 'DELETE', subscriptionStatus: null, appleActive: true });
-  assert.equal(d.ok, false);
-  assert.equal((d as any).status, 409);
-  assert.match((d as any).message, /Apple Account settings/);
+test('deleting with a live Apple subscription warns once, then is allowed', () => {
+  // Apple 5.1.1(v): say billing continues and how to cancel, but still let
+  // them delete now.
+  const first = deletionDecision({ confirm: 'DELETE', subscriptionStatus: null, appleActive: true });
+  assert.equal(first.ok, false);
+  assert.equal((first as any).status, 409);
+  assert.equal((first as any).error, 'apple_subscription_active');
+  assert.match((first as any).message, /billed by Apple/);
+  assert.match((first as any).message, /Apple Account settings/);
+  const second = deletionDecision({
+    confirm: 'DELETE', subscriptionStatus: null, appleActive: true, acknowledgeSubscription: true,
+  });
+  assert.deepEqual(second, { ok: true });
+  // Only a real `true` counts, and it never waives the typed confirmation.
+  assert.equal(deletionDecision({ confirm: 'DELETE', subscriptionStatus: null, appleActive: true, acknowledgeSubscription: 'true' }).ok, false);
+  assert.equal(deletionDecision({ confirm: 'nope', subscriptionStatus: null, appleActive: true, acknowledgeSubscription: true }).ok, false);
   assert.deepEqual(deletionDecision({ confirm: 'DELETE', subscriptionStatus: null, appleActive: false }), { ok: true });
+});
+
+test('a Stripe plan blocks deletion while it will renew, not once it is set to end', () => {
+  const renewing = deletionDecision({ confirm: 'DELETE', subscriptionStatus: 'active' });
+  assert.equal((renewing as any).error, 'subscription_active');
+  // The acknowledgement is for Apple only: we CAN stop a Stripe plan charging.
+  assert.equal(deletionDecision({ confirm: 'DELETE', subscriptionStatus: 'active', acknowledgeSubscription: true }).ok, false);
+  assert.deepEqual(
+    deletionDecision({ confirm: 'DELETE', subscriptionStatus: 'active', cancelAtPeriodEnd: true }),
+    { ok: true },
+  );
 });
