@@ -65,6 +65,7 @@ export function PaywallModal() {
       >
         <button
           onClick={closePaywall}
+          aria-label="Close"
           className="absolute top-4 right-4 text-zinc-500 hover:text-foreground transition-colors"
         >
           <X size={18} />

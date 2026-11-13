@@ -96,6 +96,7 @@ export default function SavedPage() {
                     <button
                       onClick={() => toggleVideoBookmark(video)}
                       className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center bg-black/50 hover:bg-red-500/80 transition-colors"
+                      aria-label="Remove saved video"
                       data-testid={`remove-video-${vKey}`}
                     >
                       <Trash2 size={12} className="text-white" />

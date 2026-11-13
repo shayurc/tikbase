@@ -520,6 +520,7 @@ export default function CreatorsPage() {
           ) : totalPages > 1 ? (
             <div className="flex items-center justify-center gap-2 mt-6 mb-4">
               <button
+                aria-label="Previous page"
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page === 1}
                 className="h-9 w-9 rounded-md border border-border flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
@@ -530,6 +531,7 @@ export default function CreatorsPage() {
                 {page} / {totalPages}
               </span>
               <button
+                aria-label="Next page"
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
                 className="h-9 w-9 rounded-md border border-border flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"

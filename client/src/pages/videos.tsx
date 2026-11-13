@@ -264,6 +264,8 @@ export default function VideosPage() {
                         toggleVideoBookmark(video);
                       }}
                       className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center bg-black/50 backdrop-blur-sm hover:bg-black/70 transition-colors"
+                      aria-label={bookmarked ? 'Remove from saved' : 'Save video'}
+                      aria-pressed={bookmarked}
                       data-testid={`bookmark-video-${vKey}`}
                     >
                       <Bookmark
@@ -280,6 +282,7 @@ export default function VideosPage() {
                         target="_blank"
                         rel="noopener noreferrer"
                         className="absolute bottom-2 right-2 w-7 h-7 rounded-full flex items-center justify-center bg-black/50 backdrop-blur-sm hover:bg-black/70 transition-colors cursor-pointer"
+                        aria-label="Open video on TikTok"
                         data-testid={`link-video-${vKey}`}
                       >
                         <ExternalLink size={12} className="text-white/70" />
@@ -376,6 +379,7 @@ export default function VideosPage() {
           ) : totalPages > 1 ? (
             <div className="flex items-center justify-center gap-2 mt-8 mb-4">
               <button
+                aria-label="Previous page"
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page === 1}
                 className="h-9 w-9 rounded-md border border-border flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
@@ -387,6 +391,7 @@ export default function VideosPage() {
                 {page} / {totalPages}
               </span>
               <button
+                aria-label="Next page"
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
                 className="h-9 w-9 rounded-md border border-border flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
