@@ -72,13 +72,19 @@ export function appleConfig(env: Record<string, string | undefined> = process.en
 }
 
 export type TransactionCheck =
-  | { ok: true }
+  // needsLink: the receipt is genuine but names no account (an offer code or
+  // promoted purchase), so whose it is has to come from apple-links.ts.
+  | { ok: true; needsLink: boolean }
   | { ok: false; status: 400 | 409; error: string; message: string };
 
-/** Is this genuine Apple receipt one that should count for THIS account? */
+/**
+ * Is this genuine Apple receipt one that should count for THIS account?
+ * `userId` is null when there is no caller to compare with (a notice from
+ * Apple): the app/product/environment checks still apply.
+ */
 export function checkTransaction(
   tx: AppleTransaction,
-  userId: string,
+  userId: string | null,
   cfg: AppleConfig,
 ): TransactionCheck {
   const wrongApp = {
@@ -102,7 +108,13 @@ export function checkTransaction(
   // it. A receipt can therefore only ever switch Pro on for the account that
   // bought it: copying someone else's receipt, or restoring one Apple
   // subscription onto a second TikBase account, is refused here.
-  if (!tx.appAccountToken || tx.appAccountToken.toLowerCase() !== userId.toLowerCase()) {
+  //
+  // A purchase that was NOT started in the app (an offer code redeemed in the
+  // App Store, a promoted purchase) has no stamp at all. That is not a
+  // different account, it is no account: the caller must claim it through
+  // apple-links.ts, where the first account to present it holds it.
+  if (!tx.appAccountToken) return { ok: true, needsLink: true };
+  if (userId !== null && tx.appAccountToken.toLowerCase() !== userId.toLowerCase()) {
     return {
       ok: false,
       status: 409,
@@ -111,7 +123,7 @@ export function checkTransaction(
         'This Apple subscription belongs to a different TikBase account. Sign in to the account you bought it with.',
     };
   }
-  return { ok: true };
+  return { ok: true, needsLink: false };
 }
 
 /** The record a receipt describes, as of `now`. */

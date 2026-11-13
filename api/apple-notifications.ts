@@ -19,6 +19,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient } from '@supabase/supabase-js';
 import { verifyAppleJws, AppleJwsError } from './_lib/apple-jws.js';
+import { linkedUserId } from './_lib/apple-links.js';
 import {
   appleConfig,
   checkTransaction,
@@ -74,14 +75,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ error: 'invalid_signature' });
   }
 
-  const userId = tx.appAccountToken || '';
-  if (!UUID.test(userId)) {
-    console.warn(`apple-notifications: ${note.notificationType} tx ${tx.transactionId} has no account id, ignored`);
-    return res.status(200).json({ ok: true });
-  }
-  const check = checkTransaction(tx, userId, appleConfig());
+  const check = checkTransaction(tx, null, appleConfig());
   if (!check.ok) {
     console.warn(`apple-notifications: ${note.notificationType} tx ${tx.transactionId} ignored: ${check.error}`);
+    return res.status(200).json({ ok: true });
+  }
+  if (!check.needsLink && !UUID.test(tx.appAccountToken || '')) {
+    console.warn(`apple-notifications: ${note.notificationType} tx ${tx.transactionId} has a malformed account id, ignored`);
     return res.status(200).json({ ok: true });
   }
 
@@ -92,6 +92,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const supabase = createClient(url, key, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
+
+    // Whose subscription this is: stamped into the purchase by the app, or,
+    // for an offer code or promoted purchase, whoever claimed it.
+    let userId = tx.appAccountToken || '';
+    if (check.needsLink) {
+      const linked = await linkedUserId(supabase, String(tx.originalTransactionId));
+      if (linked === 'unavailable') return res.status(503).json({ error: 'service_unavailable' });
+      if (!linked) {
+        // Nobody has opened the app with it yet. The app sends the current
+        // receipt when they do, so nothing is lost by not retrying.
+        console.warn(`apple-notifications: ${note.notificationType} tx ${tx.originalTransactionId} is not linked to an account yet, ignored`);
+        return res.status(200).json({ ok: true });
+      }
+      userId = linked;
+    }
 
     const { data, error } = await supabase.auth.admin.getUserById(userId);
     if (error && Number((error as any).status) === 404) {

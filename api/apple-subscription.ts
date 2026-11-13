@@ -25,6 +25,7 @@ import {
   newerRecord,
   type AppleTransaction,
 } from './_lib/apple-subscription.js';
+import { claimSubscription } from './_lib/apple-links.js';
 import { hasPaidAccess } from './_lib/resolve-tier.js';
 import { isUpstreamOutage, unavailable } from './_lib/upstream.js';
 
@@ -71,6 +72,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!check.ok) {
       console.warn(`apple-subscription: ${check.error} for ${userId} (tx ${tx.transactionId})`);
       return res.status(check.status).json({ error: check.error, message: check.message });
+    }
+
+    if (check.needsLink) {
+      const claim = await claimSubscription(supabase, String(tx.originalTransactionId), userId);
+      if (!claim.ok && claim.reason === 'different_account') {
+        console.warn(`apple-subscription: tokenless tx ${tx.originalTransactionId} already held, refused for ${userId}`);
+        return res.status(409).json({
+          error: 'different_account',
+          message:
+            'This Apple subscription is already attached to a different TikBase account. Sign in to that account.',
+        });
+      }
+      // Could not record or read the claim (including the table not existing
+      // yet): do not grant on a guess. The app retries on its own.
+      if (!claim.ok) return serveUnavailable(res);
     }
 
     // Read the stored record, not the token's claims: the claims are as old

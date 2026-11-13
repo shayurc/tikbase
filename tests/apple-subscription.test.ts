@@ -15,6 +15,7 @@ import {
   APPLE_EXPIRY_SLACK_MS,
   type AppleTransaction,
 } from '../api/_lib/apple-subscription';
+import { claimSubscription, linkedUserId } from '../api/_lib/apple-links';
 import { hasPaidAccess } from '../api/_lib/resolve-tier';
 import { deletionDecision } from '../api/delete-account';
 import { forcedStatus } from '../api/apple-notifications';
@@ -145,9 +146,9 @@ const tx = (over: Partial<AppleTransaction> = {}): AppleTransaction => ({
 });
 
 test('a receipt for this app, this product and this account is accepted', () => {
-  assert.deepEqual(checkTransaction(tx(), USER, cfg), { ok: true });
+  assert.deepEqual(checkTransaction(tx(), USER, cfg), { ok: true, needsLink: false });
   // Apple and Supabase may disagree on letter case in the id.
-  assert.deepEqual(checkTransaction(tx({ appAccountToken: USER.toUpperCase() }), USER, cfg), { ok: true });
+  assert.deepEqual(checkTransaction(tx({ appAccountToken: USER.toUpperCase() }), USER, cfg), { ok: true, needsLink: false });
 });
 
 test("someone else's receipt cannot unlock this account", () => {
@@ -158,8 +159,96 @@ test("someone else's receipt cannot unlock this account", () => {
   assert.equal((r as any).error, 'different_account');
 });
 
-test('a receipt with no account id unlocks nobody', () => {
-  assert.equal(checkTransaction(tx({ appAccountToken: undefined }), USER, cfg).ok, false);
+test('a receipt with no account id is not granted outright: it must be claimed', () => {
+  // Offer codes and promoted purchases. Genuine, but the receipt does not say
+  // whose it is, so the endpoint has to claim it through the links table.
+  assert.deepEqual(checkTransaction(tx({ appAccountToken: undefined }), USER, cfg), { ok: true, needsLink: true });
+  // Still has to be our app and our product.
+  assert.equal(checkTransaction(tx({ appAccountToken: undefined, bundleId: 'com.other.app' }), USER, cfg).ok, false);
+});
+
+test('a notice from Apple is checked for app and product without a caller to compare', () => {
+  assert.deepEqual(checkTransaction(tx(), null, cfg), { ok: true, needsLink: false });
+  assert.deepEqual(checkTransaction(tx({ appAccountToken: undefined }), null, cfg), { ok: true, needsLink: true });
+  assert.equal(checkTransaction(tx({ productId: 'io.tikbase.app.coins' }), null, cfg).ok, false);
+});
+
+// ---- claiming a subscription that names no account ---------------------------
+
+/** The slice of supabase-js the claim uses, over a Map. */
+function fakeLinks(opts: { existing?: Record<string, string>; deletedUsers?: string[]; failInsert?: boolean; failRead?: boolean } = {}) {
+  const rows = new Map<string, string>(Object.entries(opts.existing ?? {}));
+  const client: any = {
+    rows,
+    from() {
+      return {
+        upsert(row: any) {
+          if (opts.failInsert) return Promise.resolve({ error: { message: 'relation does not exist' } });
+          if (!rows.has(row.original_transaction_id)) rows.set(row.original_transaction_id, row.user_id);
+          return Promise.resolve({ error: null });
+        },
+        select() {
+          let id = '';
+          const q: any = {
+            eq(_c: string, v: string) { id = v; return q; },
+            maybeSingle() {
+              if (opts.failRead) return Promise.resolve({ data: null, error: { message: 'timeout' } });
+              return Promise.resolve({ data: rows.has(id) ? { user_id: rows.get(id) } : null, error: null });
+            },
+          };
+          return q;
+        },
+        update(patch: any) {
+          const conds: Record<string, string> = {};
+          const q: any = {
+            eq(c: string, v: string) { conds[c] = v; return q; },
+            then(resolve: any) {
+              const id = conds.original_transaction_id;
+              if (rows.get(id) === conds.user_id) rows.set(id, patch.user_id);
+              resolve({ error: null });
+            },
+          };
+          return q;
+        },
+      };
+    },
+    auth: { admin: { async getUserById(id: string) {
+      if ((opts.deletedUsers ?? []).includes(id)) return { data: { user: null }, error: { status: 404, message: 'User not found' } };
+      return { data: { user: { id } }, error: null };
+    } } },
+  };
+  return client;
+}
+
+const OTHER = '00000000-0000-4000-8000-000000000000';
+
+test('the first account to present a tokenless subscription claims it', async () => {
+  const db = fakeLinks();
+  assert.deepEqual(await claimSubscription(db, '1000', USER), { ok: true });
+  assert.equal(db.rows.get('1000'), USER);
+  // Presenting it again (every app launch does) is still fine.
+  assert.deepEqual(await claimSubscription(db, '1000', USER), { ok: true });
+  assert.equal(await linkedUserId(db, '1000'), USER);
+  assert.equal(await linkedUserId(db, '9999'), null);
+});
+
+test('a second account cannot claim a subscription another account holds', async () => {
+  const db = fakeLinks({ existing: { '1000': OTHER } });
+  assert.deepEqual(await claimSubscription(db, '1000', USER), { ok: false, reason: 'different_account' });
+  assert.equal(db.rows.get('1000'), OTHER);
+});
+
+test('a subscription stranded on a deleted account can be claimed again', async () => {
+  const db = fakeLinks({ existing: { '1000': OTHER }, deletedUsers: [OTHER] });
+  assert.deepEqual(await claimSubscription(db, '1000', USER), { ok: true });
+  assert.equal(db.rows.get('1000'), USER);
+});
+
+test('a claim that cannot be recorded or read back grants nothing', async () => {
+  // Includes the table not existing yet (migration not applied).
+  assert.deepEqual(await claimSubscription(fakeLinks({ failInsert: true }), '1000', USER), { ok: false, reason: 'unavailable' });
+  assert.deepEqual(await claimSubscription(fakeLinks({ failRead: true }), '1000', USER), { ok: false, reason: 'unavailable' });
+  assert.equal(await linkedUserId(fakeLinks({ failRead: true }), '1000'), 'unavailable');
 });
 
 test("a receipt from another app or for another product is refused", () => {
