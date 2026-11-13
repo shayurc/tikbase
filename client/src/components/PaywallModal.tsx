@@ -39,7 +39,8 @@ export function PaywallModal() {
       });
       const data = await res.json();
       if (!res.ok || !data.url) {
-        throw new Error(data.error || 'Failed to start checkout');
+        // `message` is the sentence for a person (e.g. already subscribed).
+        throw new Error(data.message || data.error || 'Failed to start checkout');
       }
       markStripeOpened();
       window.location.href = data.url;

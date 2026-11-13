@@ -1,6 +1,13 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import Stripe from 'stripe';
+// This import was missing from 2026-08-15 and found on 2026-11-12. Nothing caught it:
+// api/ was outside tsconfig's include, the deploy only logs type errors, and
+// the smoke test sends no token, which returns before the first use. In
+// production every expired token and every database blip threw a
+// ReferenceError here — and again in the catch block — so the endpoint
+// answered 500 instead of isPaid:false or the 503 this file exists to send.
+import { isUpstreamOutage, unavailable } from './_lib/upstream.js';
 
 // Vercel's @vercel/node builder doesn't bundle TS files outside api/ into the
 // function bundle, so shared helpers are inlined here (and in the other api/*

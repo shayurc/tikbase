@@ -5,9 +5,27 @@ import { useSubscription } from '@/hooks/use-subscription';
 
 export default function BillingPage() {
   const { user, session } = useAuth();
-  const { isPaid } = useSubscription();
+  const { isPaid, subscriptionStatus, refreshSubscription } = useSubscription();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [retrying, setRetrying] = useState(false);
+
+  // "Not known to be paying" is two different states. This page used to treat
+  // both as Free, so a paying customer whose check failed read "You are on the
+  // Free plan", "No payment method on file" and "No billing history" — three
+  // false statements, with the Manage button hidden. Only say Free when the
+  // server said so.
+  const planUnknown = !isPaid && subscriptionStatus !== 'known';
+  const isFree = !isPaid && !planUnknown;
+
+  async function handleRetry() {
+    setRetrying(true);
+    try {
+      await refreshSubscription();
+    } finally {
+      setRetrying(false);
+    }
+  }
 
   async function handleManageSubscription() {
     if (!user?.id || !session?.access_token) {
@@ -55,15 +73,30 @@ export default function BillingPage() {
             className="text-[10px] font-mono font-bold tracking-wider px-2 py-0.5 rounded uppercase"
             style={{ backgroundColor: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))' }}
           >
-            {isPaid ? 'Pro' : 'Free'}
+            {isPaid ? 'Pro' : planUnknown ? '—' : 'Free'}
           </span>
         </div>
-        <p className="text-sm text-muted-foreground mb-3">
+        <p className="text-sm text-muted-foreground mb-3" data-testid="current-plan-text">
           {isPaid
             ? 'You are on the TikBase Pro plan.'
-            : 'You are on the Free plan. Upgrade to Pro for full access.'}
+            : planUnknown
+              ? subscriptionStatus === 'loading'
+                ? 'Checking your plan…'
+                : 'We could not check your plan just now. This is a problem on our side, not a change to your subscription.'
+              : 'You are on the Free plan. Upgrade to Pro for full access.'}
         </p>
-        {!isPaid && (
+        {planUnknown && subscriptionStatus === 'unknown' && (
+          <button
+            onClick={handleRetry}
+            disabled={retrying}
+            className="inline-flex items-center gap-2 h-8 px-4 rounded-md text-xs font-bold transition-colors disabled:opacity-50 border border-border text-foreground hover:bg-secondary"
+            data-testid="btn-retry-plan"
+          >
+            {retrying && <Loader2 size={14} className="animate-spin" />}
+            Check again
+          </button>
+        )}
+        {isFree && (
           <a
             href="#/dashboard/plans"
             className="inline-flex items-center h-8 px-4 rounded-md text-xs font-bold transition-colors no-underline bg-primary text-primary-foreground"
@@ -114,9 +147,11 @@ export default function BillingPage() {
           <p className="text-sm text-muted-foreground">
             {isPaid
               ? 'Manage payment methods via the subscription portal above.'
-              : 'No payment method on file.'}
+              : planUnknown
+                ? '—'
+                : 'No payment method on file.'}
           </p>
-          {!isPaid && (
+          {isFree && (
             <p className="text-xs text-muted-foreground/60 mt-1">
               Add a payment method when you upgrade to Pro.
             </p>
@@ -135,9 +170,11 @@ export default function BillingPage() {
           <p className="text-sm text-muted-foreground">
             {isPaid
               ? 'View invoices in the subscription portal.'
-              : 'No billing history.'}
+              : planUnknown
+                ? '—'
+                : 'No billing history.'}
           </p>
-          {!isPaid && (
+          {isFree && (
             <p className="text-xs text-muted-foreground/60 mt-1">
               Your invoices will appear here once you subscribe.
             </p>
