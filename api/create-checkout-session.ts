@@ -7,6 +7,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
+import { ACTIVE_STATUSES } from './_lib/resolve-tier.js';
 
 // Hardcoded live Stripe price IDs. Add new plans here.
 const PRICE_IDS: Record<string, string> = {
@@ -41,7 +42,11 @@ function getBaseUrl(req: VercelRequest): string {
   // Prefer explicit env, fall back to request host.
   if (process.env.APP_URL) return process.env.APP_URL;
   const host = req.headers['x-forwarded-host'] || req.headers.host;
-  const proto = (req.headers['x-forwarded-proto'] as string) || 'https';
+  // Vercel always sends x-forwarded-proto. The dev server (which now runs this
+  // handler rather than a hand-kept copy) does not, and Stripe has to send the
+  // buyer back to http://localhost, not https.
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(String(host));
+  const proto = (req.headers['x-forwarded-proto'] as string) || (local ? 'http' : 'https');
   return `${proto}://${host}`;
 }
 
@@ -79,6 +84,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const user_id = authData.user.id;
+
+    // One subscription per account, enforced here because here is the only
+    // place it cannot be clicked around. The Plans page offered "Upgrade to
+    // Pro" to people already paying (it never read the tier), and the app
+    // shows a paying customer as free whenever the subscription check fails —
+    // so a second checkout was one click away: a new Stripe customer, a second
+    // charge, and a subscription the billing portal (which opens the FIRST
+    // customer) never shows them.
+    //
+    // If the plan cannot be read, refuse rather than guess: asking a buyer to
+    // try again costs a minute, a double charge costs a refund and their trust.
+    const { data: existing, error: existingErr } =
+      await supabase.auth.admin.getUserById(user_id);
+    if (existingErr || !existing?.user) {
+      console.error('create-checkout-session: could not read current plan:', existingErr?.message);
+      res.setHeader('Retry-After', '30');
+      return res.status(503).json({
+        error: 'plan_check_failed',
+        message: 'We could not check your current plan. Nothing was charged — please try again in a moment.',
+      });
+    }
+    const currentStatus = (existing.user.app_metadata as any)?.subscription?.status;
+    if (currentStatus && ACTIVE_STATUSES.has(currentStatus)) {
+      return res.status(409).json({
+        error: 'already_subscribed',
+        message: 'You already have TikBase Pro. Manage your subscription from Billing.',
+      });
+    }
 
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
     const baseUrl = getBaseUrl(req);

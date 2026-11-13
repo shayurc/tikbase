@@ -8,6 +8,7 @@ import { productDetailPath } from '@/components/ProductSearch';
 import {
   ArrowLeft, ExternalLink, Lock, Store, AlertCircle, Package, ShoppingCart, Layers,
 } from 'lucide-react';
+import { decodeRouteParam } from '@/lib/route-param';
 
 interface BrandProduct {
   product_id: string;
@@ -89,7 +90,9 @@ export default function BrandProfilePage() {
 
   // Encoded at the link, because the second address form is 'name:<shop>' and
   // shop names contain spaces, slashes and ampersands.
-  const sellerId = params?.sellerId ? decodeURIComponent(params.sellerId) : '';
+  // decodeRouteParam, not decodeURIComponent: a shop name with a % in it
+  // ("100% Pure") threw here and took the whole app down with it.
+  const sellerId = decodeRouteParam(params?.sellerId);
 
   useEffect(() => {
     if (!sellerId) return;

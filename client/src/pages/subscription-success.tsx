@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Redirect } from 'wouter';
 import { CheckCircle2, Loader2, AlertCircle } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { useSubscription } from '@/hooks/use-subscription';
+import { askSubscription } from '@/lib/subscription-check';
 
 type Stage = 'verifying' | 'confirmed' | 'error';
 
@@ -26,8 +27,12 @@ function getSessionIdFromUrl(): string | null {
 }
 
 export default function SubscriptionSuccessPage() {
-  const { user, loading: authLoading } = useAuth();
+  const { user, session, loading: authLoading } = useAuth();
   const { refreshSubscription } = useSubscription();
+  // The token can be refreshed while the poll below is running; read it fresh
+  // on every attempt instead of closing over the one from the first render.
+  const tokenRef = useRef<string | undefined>(session?.access_token);
+  tokenRef.current = session?.access_token;
   const [stage, setStage] = useState<Stage>('verifying');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [autoRedirectIn, setAutoRedirectIn] = useState<number>(4);
@@ -48,9 +53,15 @@ export default function SubscriptionSuccessPage() {
       // Path A: we have a session_id — hit verify-session for instant confirmation.
       if (sessionId) {
         try {
+          // The bearer is what the server goes by. user_id stays in the body
+          // only so a server from before 2026-11 still accepts the request
+          // while a deploy is rolling out; the current one never writes to it.
           const res = await fetch('/api/verify-session', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(tokenRef.current ? { Authorization: `Bearer ${tokenRef.current}` } : {}),
+            },
             body: JSON.stringify({ session_id: sessionId, user_id: user!.id }),
           });
           const data = await res.json();
@@ -66,21 +77,24 @@ export default function SubscriptionSuccessPage() {
 
       // Path B: no session_id or verify-session didn't confirm — poll check-subscription
       // while the webhook lands. Up to ~20s.
+      //
+      // This poll used to send `?user_id=` and no Authorization header. The
+      // endpoint has never read user_id (it would let anyone read anyone's
+      // status) and answers isPaid:false to a request with no token, so the
+      // loop could not succeed: twenty identical "no"s, then "We couldn't
+      // confirm your subscription" shown to someone who had just paid.
       for (let i = 0; i < 20; i++) {
         if (cancelled) return;
-        try {
-          const res = await fetch(
-            `/api/check-subscription?user_id=${encodeURIComponent(user!.id)}`,
-          );
-          const data = await res.json();
-          if (data.isPaid) {
+        const token = tokenRef.current;
+        if (token) {
+          // No retries inside the helper — this loop is the retry.
+          const answer = await askSubscription(token, { retryDelaysMs: [] });
+          if (answer.known && answer.isPaid) {
             if (cancelled) return;
             await refreshSubscription();
             setStage('confirmed');
             return;
           }
-        } catch {
-          /* keep polling */
         }
         await new Promise(r => setTimeout(r, 1000));
       }

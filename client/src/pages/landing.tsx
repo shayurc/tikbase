@@ -21,7 +21,7 @@ export default function LandingPage() {
           </div>
           <div className="flex items-center gap-4">
             <Link href="/login" className="text-neutral-400 font-['Space_Grotesk'] text-sm hover:text-primary transition-colors duration-300 no-underline">Log in</Link>
-            <Link href="/signup" className="bg-primary text-primary-foreground px-6 py-2.5 rounded-full font-['Space_Grotesk'] text-sm font-bold hover:brightness-110 active:scale-95 transition-all no-underline inline-block">Start Free Trial</Link>
+            <Link href="/signup" className="bg-primary text-primary-foreground px-6 py-2.5 rounded-full font-['Space_Grotesk'] text-sm font-bold hover:brightness-110 active:scale-95 transition-all no-underline inline-block">Start Free</Link>
           </div>
         </div>
       </nav>
@@ -46,7 +46,10 @@ export default function LandingPage() {
             </p>
             <div className="flex flex-col items-center gap-4">
               <Link href="/signup" className="bg-primary text-primary-foreground px-10 py-5 rounded-full font-['Space_Grotesk'] text-lg font-bold hover:brightness-110 active:scale-95 transition-all no-underline inline-block" style={{ boxShadow: '0 0 40px rgba(221,255,175,0.15)' }}>
-                Start Your 7-Day Free Trial
+                {/* Said "Start Your 7-Day Free Trial". There is no trial: nothing in
+                    api/create-checkout-session.ts sets one, so Pro is charged the day
+                    it is bought. What is true is that signing up is free, with no card. */}
+                Start Free
               </Link>
               <span className="font-['IBM_Plex_Mono'] text-xs text-[#767577] tracking-wider">$44.99/mo · Cancel anytime</span>
             </div>
@@ -227,7 +230,7 @@ export default function LandingPage() {
                 </li>
               </ul>
               <Link href="/signup" className="mt-auto w-full py-4 rounded-full bg-primary text-primary-foreground font-['Space_Grotesk'] font-bold hover:brightness-110 active:scale-95 transition-all text-center no-underline inline-block">
-                Start 7-Day Free Trial
+                Start Free, Upgrade Anytime
               </Link>
             </div>
           </div>

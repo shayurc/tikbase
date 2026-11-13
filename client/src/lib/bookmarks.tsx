@@ -1,10 +1,12 @@
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import type { VideoWithProduct, Product } from './supabase';
+import { isVideoSaved, toggleSavedVideo } from './video-key';
 
 interface BookmarkState {
   savedVideos: VideoWithProduct[];
   savedProducts: Product[];
-  isVideoBookmarked: (videoId: number) => boolean;
+  /** Takes the row, not an id: video rows have no id. See lib/video-key.ts. */
+  isVideoBookmarked: (video: VideoWithProduct) => boolean;
   isProductBookmarked: (productId: string) => boolean;
   toggleVideoBookmark: (video: VideoWithProduct) => void;
   toggleProductBookmark: (product: Product) => void;
@@ -52,7 +54,7 @@ export function BookmarkProvider({ children }: { children: ReactNode }) {
   }, [savedProducts]);
 
   const isVideoBookmarked = useCallback(
-    (videoId: number) => savedVideos.some(v => v.id === videoId),
+    (video: VideoWithProduct) => isVideoSaved(savedVideos, video),
     [savedVideos]
   );
 
@@ -62,11 +64,7 @@ export function BookmarkProvider({ children }: { children: ReactNode }) {
   );
 
   const toggleVideoBookmark = useCallback((video: VideoWithProduct) => {
-    setSavedVideos(prev => {
-      const exists = prev.some(v => v.id === video.id);
-      if (exists) return prev.filter(v => v.id !== video.id);
-      return [...prev, video];
-    });
+    setSavedVideos(prev => toggleSavedVideo(prev, video));
   }, []);
 
   const toggleProductBookmark = useCallback((product: Product) => {

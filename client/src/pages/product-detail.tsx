@@ -12,6 +12,7 @@ import {
   ArrowLeft, ExternalLink, Lock, PackageSearch, AlertCircle, Play,
   Video, Users, Eye, Percent, BadgeDollarSign,
 } from 'lucide-react';
+import { decodeRouteParam } from '@/lib/route-param';
 
 interface WindowStats {
   videos: number;
@@ -115,7 +116,7 @@ export default function ProductDetailPage() {
   const [error, setError] = useState(false);
   const [notFound, setNotFound] = useState(false);
 
-  const id = params?.id ? decodeURIComponent(params.id) : '';
+  const id = decodeRouteParam(params?.id);
 
   useEffect(() => {
     if (!id) return;
