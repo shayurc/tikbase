@@ -16,10 +16,23 @@ export async function authHeader(): Promise<Record<string, string>> {
   }
 }
 
-const SUPABASE_URL = 'https://ntapskfgodvynlfyulnv.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im50YXBza2Znb2R2eW5sZnl1bG52Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM2MzEyNzUsImV4cCI6MjA4OTIwNzI3NX0.jOA-9kwBrOsfc8uqFFcyp0PajoKl9HQcRmaliYELBQo';
-
-const REST_URL = `${SUPABASE_URL}/rest/v1`;
+/**
+ * Whose data a cached response is.
+ *
+ * The page caches below were keyed on the query alone — niche, days, page — and
+ * lived for 30 minutes, so they outlasted the session that filled them: sign
+ * out, sign in as someone else on the same browser, and the first account's
+ * rows (a Pro ranking, say) were served to the second from memory without a
+ * request. Every key now starts with the account it was fetched for.
+ */
+export async function cacheScope(): Promise<string> {
+  try {
+    const { data } = await supabaseAuth.auth.getSession();
+    return data.session?.user?.id ?? 'anon';
+  } catch {
+    return 'anon';
+  }
+}
 
 // Simple in-memory cache for expensive queries
 const queryCache = new Map<string, { data: any; timestamp: number }>();
@@ -39,33 +52,12 @@ function setCache(key: string, data: any): void {
   queryCache.set(key, { data, timestamp: Date.now() });
 }
 
-const headers = {
-  'apikey': SUPABASE_ANON_KEY,
-  'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-  'Content-Type': 'application/json',
-  'Prefer': 'count=exact',
-};
-
-async function query(table: string, params: Record<string, string> = {}): Promise<{ data: any[]; count: number | null }> {
-  const url = new URL(`${REST_URL}/${table}`);
-  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  
-  const res = await fetch(url.toString(), { headers });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Supabase error: ${res.status} ${text}`);
-  }
-  
-  const data = await res.json();
-  const contentRange = res.headers.get('content-range');
-  let count: number | null = null;
-  if (contentRange) {
-    const match = contentRange.match(/\/(\d+|\*)/);
-    if (match && match[1] !== '*') count = parseInt(match[1], 10);
-  }
-  
-  return { data, count };
-}
+// What used to sit here: a REST client that read `products`,
+// `product_snapshots` and `product_videos` straight from the browser with the
+// public key, and two fetchers built on it. Nothing has called them since the
+// pages moved to /api/*, and row-level security now answers the public key
+// with zero rows (measured 2026-11-12), so they could only ever return empty.
+// Removed rather than left as a map of the tables for anyone reading the bundle.
 
 export interface Product {
   id: number;
@@ -161,7 +153,8 @@ export function extractPostDate(videoUrl: string): Date | null {
     const videoId = BigInt(match[1]);
     const timestamp = Number(videoId >> 32n);
     const date = new Date(timestamp * 1000);
-    if (date.getFullYear() < 2020 || date.getFullYear() > 2027) return null;
+    // Not a literal year: `> 2027` would have emptied Top Videos on 2028-01-01.
+    if (date.getFullYear() < 2020 || date.getTime() > Date.now() + 86_400_000) return null;
     return date;
   } catch {
     return null;
@@ -208,7 +201,7 @@ export async function fetchTopVideos(
   limit: number = 50
 ): Promise<{ videos: VideoWithProduct[]; total: number }> {
   // Client-side cache (5 min) to avoid redundant API calls during tab switching
-  const cacheKey = `videos:${nicheSlug}:${days}:${page}:${limit}`;
+  const cacheKey = `${await cacheScope()}:videos:${nicheSlug}:${days}:${page}:${limit}`;
   type VideoCache = { videos: VideoWithProduct[]; total: number };
   const cached = getCached<VideoCache>(cacheKey);
   if (cached) return cached;
@@ -232,140 +225,5 @@ export async function fetchTopVideos(
   };
 
   setCache(cacheKey, result);
-  return result;
-}
-
-// Fetch products for a niche with time-scoped data.
-// Uses snapshot deltas when available, falls back to cumulative data.
-export async function fetchProducts(
-  nicheSlug: string,
-  days: number,
-  page: number = 1,
-  limit: number = 50
-): Promise<{ products: (Product & { period_sold?: number; period_revenue?: number })[]; total: number }> {
-  const offset = (page - 1) * limit;
-
-  // Check cache first — stores the full enriched product list for this niche+timeframe
-  const cacheKey = `products:${nicheSlug}:${days}`;
-  type ProductCache = { products: (Product & { period_sold?: number; period_revenue?: number })[]; total: number };
-  const cached = getCached<ProductCache>(cacheKey);
-  if (cached) {
-    return {
-      products: cached.products.slice(offset, offset + limit),
-      total: cached.total,
-    };
-  }
-
-  // Get all products for this niche
-  const { data: allProducts } = await query('products', {
-    select: '*',
-    niche_slug: `eq.${nicheSlug}`,
-    limit: '2000',
-  });
-
-  if (!allProducts || allProducts.length === 0) return { products: [], total: 0 };
-
-  // Try to get snapshot data for delta calculations
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - days);
-  const cutoffStr = cutoffDate.toISOString().split('T')[0];
-
-  // Get snapshots for all products in this niche
-  const productIds = allProducts.map((p: any) => p.product_id);
-  const batchSize = 150;
-  let allSnapshots: any[] = [];
-
-  for (let i = 0; i < productIds.length; i += batchSize) {
-    const batch = productIds.slice(i, i + batchSize);
-    const inList = `(${batch.map((id: string) => `"${id}"`).join(',')})`;
-    const { data: snaps } = await query('product_snapshots', {
-      select: '*',
-      product_id: `in.${inList}`,
-      order: 'snapshot_date.asc',
-      limit: '5000',
-    });
-    if (snaps) allSnapshots = allSnapshots.concat(snaps);
-  }
-
-  // Build snapshot map: product_id -> sorted snapshots
-  const snapMap: Record<string, any[]> = {};
-  for (const s of allSnapshots) {
-    if (!snapMap[s.product_id]) snapMap[s.product_id] = [];
-    snapMap[s.product_id].push(s);
-  }
-
-  // Calculate period-specific metrics for each product
-  const enrichedProducts = allProducts.map((p: any) => {
-    const snaps = snapMap[p.product_id] || [];
-    const price = p.sale_price || 0;
-
-    if (snaps.length >= 2) {
-      const sortedSnaps = snaps.sort((a: any, b: any) => a.snapshot_date.localeCompare(b.snapshot_date));
-      const latestSnap = sortedSnaps[sortedSnaps.length - 1];
-
-      let earliestSnap = sortedSnaps[0];
-      for (const s of sortedSnaps) {
-        if (s.snapshot_date <= cutoffStr) earliestSnap = s;
-        else break;
-      }
-
-      const deltaSold = Math.max(0, (latestSnap.sold_count || 0) - (earliestSnap.sold_count || 0));
-      const snapPrice = latestSnap.sale_price || earliestSnap.sale_price || price;
-
-      return {
-        ...p,
-        period_sold: deltaSold,
-        period_revenue: deltaSold * snapPrice,
-        _sortValue: deltaSold,
-      };
-    }
-
-    // No delta data — use cumulative values
-    return {
-      ...p,
-      period_sold: p.sold_count || 0,
-      period_revenue: (p.sold_count || 0) * price,
-      _sortValue: p.sold_count || 0,
-    };
-  });
-
-  // Sort by period sold (descending)
-  enrichedProducts.sort((a: any, b: any) => (b._sortValue || 0) - (a._sortValue || 0));
-  const total = enrichedProducts.length;
-
-  // Cache the full sorted list
-  setCache(cacheKey, { products: enrichedProducts, total });
-
-  return { products: enrichedProducts.slice(offset, offset + limit), total };
-}
-
-// Fetch top videos for a product (for product table thumbnails)
-export async function fetchProductVideos(
-  productIds: string[]
-): Promise<Record<string, ProductVideo[]>> {
-  if (productIds.length === 0) return {};
-
-  const result: Record<string, ProductVideo[]> = {};
-  const batchSize = 150;
-
-  for (let i = 0; i < productIds.length; i += batchSize) {
-    const batch = productIds.slice(i, i + batchSize);
-    const inList = `(${batch.map((id: string) => `"${id}"`).join(',')})`;
-    const { data } = await query('product_videos', {
-      select: '*',
-      product_id: `in.${inList}`,
-      order: 'view_count.desc',
-    });
-
-    if (data) {
-      data.forEach((v: any) => {
-        if (!result[v.product_id]) result[v.product_id] = [];
-        if (result[v.product_id].length < 5) {
-          result[v.product_id].push(v as ProductVideo);
-        }
-      });
-    }
-  }
-
   return result;
 }

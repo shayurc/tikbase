@@ -1,0 +1,42 @@
+name: CI
+
+# Why this exists.
+#
+# Nothing ran the type check or the tests before a merge. api/check-subscription.ts
+# shipped calling two functions it never imported and answered 500 in production
+# for three months; `tsc` reports that in a second. CLAUDE.md asks for
+# `npm run check`, `npm test` and `npm run build` before a merge — this asks the
+# same thing of every pull request, so it does not depend on someone remembering.
+#
+# No secrets, no database, no vendor calls: the tests are hermetic by design.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --include=dev
+      - name: Type check
+        run: npm run check
+      - name: Tests
+        run: npm test
+      - name: Build
+        run: npm run build
