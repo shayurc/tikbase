@@ -1,6 +1,8 @@
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import type { VideoWithProduct, Product } from './supabase';
 import { isVideoSaved, toggleSavedVideo } from './video-key';
+import { useAuth } from './auth';
+import { loadScoped, saveScoped, type KeyValueStore } from './bookmark-store';
 
 interface BookmarkState {
   savedVideos: VideoWithProduct[];
@@ -16,42 +18,63 @@ const BookmarkContext = createContext<BookmarkState | null>(null);
 
 const VIDEOS_KEY = 'tikbase:savedVideos';
 const PRODUCTS_KEY = 'tikbase:savedProducts';
+const EMPTY_VIDEOS: VideoWithProduct[] = [];
+const EMPTY_PRODUCTS: Product[] = [];
 
-// localStorage may be unavailable (e.g. sandboxed iframe hosts); degrade
-// gracefully so bookmarks persist where possible and never throw where not.
-function loadSaved<T>(key: string): T[] {
-  try {
-    const raw = localStorage.getItem(key);
-    const parsed = raw ? JSON.parse(raw) : null;
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function persistSaved<T>(key: string, value: T[]): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* storage blocked — keep in-memory only */
-  }
+/** Never throws: a browser with storage blocked gets in-memory bookmarks. */
+function browserStore(): KeyValueStore {
+  return {
+    getItem: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+    setItem: (k, v) => { try { localStorage.setItem(k, v); } catch { /* blocked */ } },
+    removeItem: (k) => { try { localStorage.removeItem(k); } catch { /* blocked */ } },
+  };
 }
 
 export function BookmarkProvider({ children }: { children: ReactNode }) {
-  const [savedVideos, setSavedVideos] = useState<VideoWithProduct[]>(() =>
-    loadSaved<VideoWithProduct>(VIDEOS_KEY)
-  );
-  const [savedProducts, setSavedProducts] = useState<Product[]>(() =>
-    loadSaved<Product>(PRODUCTS_KEY)
-  );
+  const { user, loading } = useAuth();
+  // null until auth has settled: loading someone's list before we know who is
+  // signed in is how one account ends up looking at another's.
+  const scope = loading ? null : (user?.id ?? 'anon');
+
+  const [saved, setSaved] = useState<{
+    scope: string | null;
+    videos: VideoWithProduct[];
+    products: Product[];
+  }>({ scope: null, videos: [], products: [] });
 
   useEffect(() => {
-    persistSaved(VIDEOS_KEY, savedVideos);
-  }, [savedVideos]);
+    if (scope === null) return;
+    const store = browserStore();
+    setSaved({
+      scope,
+      videos: loadScoped<VideoWithProduct>(store, VIDEOS_KEY, scope),
+      products: loadScoped<Product>(store, PRODUCTS_KEY, scope),
+    });
+  }, [scope]);
 
   useEffect(() => {
-    persistSaved(PRODUCTS_KEY, savedProducts);
-  }, [savedProducts]);
+    // Only ever write a list back under the account it was loaded for. Between
+    // a sign-out and the next load, `saved` still holds the previous account's.
+    if (saved.scope === null || saved.scope !== scope) return;
+    const store = browserStore();
+    saveScoped(store, VIDEOS_KEY, saved.scope, saved.videos);
+    saveScoped(store, PRODUCTS_KEY, saved.scope, saved.products);
+  }, [saved, scope]);
+
+  // What the rest of the app sees: nothing, until this account's list is loaded.
+  const current = saved.scope !== null && saved.scope === scope;
+  const savedVideos = current ? saved.videos : EMPTY_VIDEOS;
+  const savedProducts = current ? saved.products : EMPTY_PRODUCTS;
+  const setSavedVideos = useCallback(
+    (update: (prev: VideoWithProduct[]) => VideoWithProduct[]) =>
+      setSaved((s) => ({ ...s, videos: update(s.videos) })),
+    [],
+  );
+  const setSavedProducts = useCallback(
+    (update: (prev: Product[]) => Product[]) =>
+      setSaved((s) => ({ ...s, products: update(s.products) })),
+    [],
+  );
 
   const isVideoBookmarked = useCallback(
     (video: VideoWithProduct) => isVideoSaved(savedVideos, video),

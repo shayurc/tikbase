@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 import { supabaseAuth } from './supabaseAuth';
-import { getReferral, clearReferral } from './referral';
+import { getReferral, clearReferral, shouldAttachReferral } from './referral';
 
 interface AuthState {
   session: Session | null;
@@ -66,6 +66,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const { data: { subscription } } = supabaseAuth.auth.onAuthStateChange((event, session) => {
       if (event === 'PASSWORD_RECOVERY') setRecovering(true);
+      if (event === 'SIGNED_IN' && session?.user) {
+        // A Google sign-up's referral code. Deferred: calling another auth
+        // method from inside this callback can deadlock the client.
+        const u = session.user;
+        const referral = getReferral();
+        if (
+          referral &&
+          shouldAttachReferral({
+            hasStoredCode: true,
+            alreadyAttributed: Boolean((u.user_metadata as any)?.referral?.code),
+            accountCreatedAt: u.created_at,
+          })
+        ) {
+          setTimeout(() => {
+            supabaseAuth.auth
+              .updateUser({ data: { referral } })
+              .then(({ error }) => { if (!error) clearReferral(); })
+              .catch(() => {});
+          }, 0);
+        }
+      }
       setSession(session);
       setLoading(false);
     });

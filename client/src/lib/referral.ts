@@ -91,3 +91,31 @@ export function getReferral(): Referral | null {
 export function clearReferral(): void {
   try { localStorage.removeItem(KEY); } catch { /* nothing to clean up */ }
 }
+
+/** How long after an account is created a stored code still counts as its source. */
+export const ATTRIBUTION_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * Should the stored code be written to this account now?
+ *
+ * Email sign-up writes the code as part of the sign-up call. A Google sign-up
+ * never passes through that call, so the code rode the redirect back, was
+ * stored again, and then nothing attached it to anyone: every affiliate-driven
+ * Google sign-up was unattributed.
+ *
+ * It is attached at first sign-in instead — but only to an account that was
+ * JUST created. Without that bound, an existing customer who later clicked an
+ * affiliate link and signed in would be credited to that affiliate.
+ */
+export function shouldAttachReferral(input: {
+  hasStoredCode: boolean;
+  alreadyAttributed: boolean;
+  accountCreatedAt: string | null | undefined;
+  now?: number;
+}): boolean {
+  if (!input.hasStoredCode || input.alreadyAttributed) return false;
+  const created = Date.parse(input.accountCreatedAt ?? '');
+  if (!Number.isFinite(created)) return false;
+  const age = (input.now ?? Date.now()) - created;
+  return age >= 0 && age <= ATTRIBUTION_WINDOW_MS;
+}

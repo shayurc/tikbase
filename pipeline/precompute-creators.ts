@@ -136,14 +136,29 @@ export { deriveCreatorKey };
 // product absent from the payload contributes 0 GMV, which means creators who
 // only promote unranked products score 0. Stated rather than hidden — closing it
 // needs a revenue model for the whole catalogue, not just the top 400 per niche.
-async function loadRevenuePayload(cacheKey: string): Promise<Map<string, RevenueEntry>> {
+async function loadRevenuePayload(
+  cacheKey: string,
+  opts: { allowMissing?: boolean } = {},
+): Promise<Map<string, RevenueEntry>> {
   const m = new Map<string, RevenueEntry>();
   const { data, error } = await supabase
     .from('rankings_cache')
     .select('payload')
     .eq('cache_key', cacheKey)
     .maybeSingle();
-  if (error || !data || !Array.isArray((data as any).payload)) return m;
+  // An unreadable or missing payload used to return an empty map, which the
+  // ranking below reads as "every product earned $0": one timeout on this read
+  // published a leaderboard of creators at zero GMV, logged as a success, for
+  // 24 hours. Throwing fails this one combo instead, and the previous
+  // leaderboard for it stays in place.
+  if (error) throw new Error(`revenue payload ${cacheKey} unreadable: ${error.message}`);
+  if (!data || !Array.isArray((data as any).payload)) {
+    // The 'all' union tolerates a niche with no row (it contributes nothing,
+    // as documented below). A read ERROR is never tolerated: that is unknown,
+    // not empty.
+    if (opts.allowMissing) return m;
+    throw new Error(`revenue payload ${cacheKey} is missing — product rankings must be precomputed first`);
+  }
   for (const p of (data as any).payload) {
     const pid = p?.product_id;
     if (!pid) continue;
@@ -176,7 +191,7 @@ async function loadRevenue(niche: string, days: number): Promise<Map<string, Rev
   const merged = new Map<string, RevenueEntry>();
   for (const n of NICHE_SLUGS) {
     if (n === 'all') continue;
-    const m = await loadRevenuePayload(`products:${n}:${days}`);
+    const m = await loadRevenuePayload(`products:${n}:${days}`, { allowMissing: true });
     for (const [pid, entry] of m) {
       // Keep the higher revenue if a product somehow appears twice, so the
       // union can never under-report relative to any single niche.
@@ -186,7 +201,7 @@ async function loadRevenue(niche: string, days: number): Promise<Map<string, Rev
   }
   // Fold in the global payload too: it can contain a product whose niche
   // payload was missing or failed to compute.
-  const globalPayload = await loadRevenuePayload(`products:all:${days}`);
+  const globalPayload = await loadRevenuePayload(`products:all:${days}`, { allowMissing: true });
   for (const [pid, entry] of globalPayload) {
     const prev = merged.get(pid);
     if (!prev || entry.estRevenue > prev.estRevenue) merged.set(pid, entry);
@@ -587,6 +602,13 @@ async function main() {
     `\nCreator precompute done: ${ok} ok, ${fail} failed in ` +
     `${((Date.now() - started) / 1000).toFixed(0)}s`,
   );
+  // Exit red when anything failed. This used to exit 0 with "N failed" in a
+  // log nobody reads, so a night where every combo failed was a green tick.
+  // Last line on purpose: everything that could be salvaged has been written.
+  if (fail > 0) {
+    console.error(`${fail} leaderboard(s) were NOT rebuilt and still hold their previous data.`);
+    process.exitCode = 1;
+  }
 }
 
 main().catch((err) => {
