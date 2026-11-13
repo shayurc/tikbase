@@ -13,6 +13,7 @@
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient } from '@supabase/supabase-js';
+import { acceptableImage, plausibleVideoId } from './_lib/image-guard.js';
 
 const BUCKET = 'thumbnails';
 const OEMBED_TIMEOUT_MS = 8000;
@@ -105,8 +106,10 @@ async function serveProductThumb(
     const img = await fetchWithTimeout(src, IMG_TIMEOUT_MS);
     if (!img.ok) return sendPlaceholder(res);
     const buf = Buffer.from(await img.arrayBuffer());
-    if (buf.byteLength === 0) return sendPlaceholder(res);
-    const contentType = img.headers.get('content-type') || 'image/jpeg';
+    // Stored under the type the BYTES are, not the type the origin claimed.
+    const verdict = acceptableImage(buf);
+    if (!verdict.ok) return sendPlaceholder(res);
+    const contentType = verdict.contentType;
 
     const { error: upErr } = await supabase.storage
       .from(BUCKET)
@@ -139,7 +142,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return serveProductThumb(supabase, productId, res);
   }
 
-  if (!/^\d{5,}$/.test(vid)) return sendPlaceholder(res);
+  if (!plausibleVideoId(vid)) return sendPlaceholder(res);
 
   const path = `thumbs/${vid}.jpg`;
   const publicUrl = supabase.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
@@ -170,6 +173,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // 2. Miss -> oEmbed once, fetch bytes, upload to Storage.
   try {
+    // An existence check against product_videos was tried here and removed:
+    // measured 2026-11-13, both `video_id = $1` and the video_url match timed
+    // out at the 10s gateway limit on the 656k-row table while the nightly
+    // refresh was running. It would have turned every uncached thumbnail into
+    // a placeholder. What limits abuse instead is plausibleVideoId above (the
+    // old rule took any five digits) and acceptableImage below.
     const oembedUrl = `https://www.tiktok.com/oembed?url=https://www.tiktok.com/@t/video/${vid}`;
     const o = await fetchWithTimeout(oembedUrl, OEMBED_TIMEOUT_MS);
     if (!o.ok) return sendPlaceholder(res);
@@ -180,7 +189,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const img = await fetchWithTimeout(thumb, IMG_TIMEOUT_MS);
     if (!img.ok) return sendPlaceholder(res);
     const buf = Buffer.from(await img.arrayBuffer());
-    const contentType = img.headers.get('content-type') || 'image/jpeg';
+    const verdict = acceptableImage(buf);
+    if (!verdict.ok) return sendPlaceholder(res);
+    const contentType = verdict.contentType;
 
     const { error: upErr } = await supabase.storage
       .from(BUCKET)

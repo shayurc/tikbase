@@ -63,8 +63,12 @@ export default function VideosPage() {
   // the current view has loaded, and sequentially, so we don't fire 5 heavy
   // uncached computations at once and starve the foreground request. Disabled
   // while the current view is still loading.
+  //
+  // Pro only. The server pins a free caller to one window whatever is asked
+  // for, so for them this was five more requests for the same ten rows on
+  // every visit — read volume on a project that has already hit its cap once.
   useEffect(() => {
-    if (loading) return;
+    if (loading || !isPaid) return;
     let cancelled = false;
     const others = TIMEFRAMES.filter(t => t.days !== timeframe.days);
     (async () => {
@@ -74,7 +78,7 @@ export default function VideosPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [niche, loading]);
+  }, [niche, loading, isPaid]);
 
   const nicheLabel = NICHES.find(n => n.slug === niche)?.label || niche;
 
