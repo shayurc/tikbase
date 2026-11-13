@@ -26,6 +26,7 @@
  * by creator rather than by URL, is what makes the leaderboard render faces.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { acceptableImage } from './image-guard.js';
 
 export const AVATAR_BUCKET = 'thumbnails'; // reuse the existing bucket; distinct path prefix
 export const AVATAR_PREFIX = 'avatars';
@@ -131,11 +132,15 @@ export async function cacheAvatar(
   } catch {
     return { outcome: 'fetch-failed', publicUrl, bytes: 0, status: img.status };
   }
-  if (buf.byteLength === 0) {
+  // Not an image, or implausibly large: same outcome as an empty body — a 200
+  // with nothing usable in it. The stored type comes from the bytes, not from
+  // the origin's header.
+  const verdict = acceptableImage(buf);
+  if (!verdict.ok) {
     return { outcome: 'empty', publicUrl, bytes: 0, status: img.status };
   }
 
-  const contentType = img.headers.get('content-type') || 'image/jpeg';
+  const contentType = verdict.contentType;
   const { error } = await supabase.storage
     .from(AVATAR_BUCKET)
     .upload(path, buf, { contentType, upsert: true, cacheControl: '31536000' });

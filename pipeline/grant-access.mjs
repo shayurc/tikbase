@@ -63,8 +63,16 @@ if (!user) {
   if (error) { console.error("createUser failed:", error.message); process.exit(1); }
   user = data.user;
   console.log(`Created account ${user.id} for ${email}`);
-  const { error: linkErr } = await sb.auth.admin.generateLink({ type: "recovery", email });
-  if (!linkErr) console.log("Password-reset email queued (customer sets their own password).");
+  // generateLink only RETURNS a link; it sends nothing. This line used to call
+  // it, discard the link, and log "Password-reset email queued" — so a customer
+  // whose account was created here never received a way to sign in.
+  // resetPasswordForEmail is the call that sends the email.
+  const { error: mailErr } = await sb.auth.resetPasswordForEmail(email);
+  if (mailErr) {
+    console.error(`Password-reset email NOT sent (${mailErr.message}). Send the customer to "Forgot your password?" on the login page.`);
+  } else {
+    console.log("Password-reset email sent (customer sets their own password).");
+  }
 }
 
 // 3. Stamp the subscription onto the account + backfill Stripe metadata

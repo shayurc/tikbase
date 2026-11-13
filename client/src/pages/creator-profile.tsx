@@ -7,6 +7,7 @@ import { LoadingBar } from '@/components/LoadingBar';
 import {
   ArrowLeft, ExternalLink, Lock, UserX, AlertCircle, Video, Package, Eye, Percent,
 } from 'lucide-react';
+import { decodeRouteParam } from '@/lib/route-param';
 
 interface WindowStats {
   videos: number;
@@ -115,7 +116,7 @@ export default function CreatorProfilePage() {
   const [page, setPage] = useState(1);
 
   // The route param is URL-encoded because half of all keys are 'id:<digits>'.
-  const key = params?.key ? decodeURIComponent(params.key) : '';
+  const key = decodeRouteParam(params?.key);
 
   useEffect(() => {
     if (!key) return;

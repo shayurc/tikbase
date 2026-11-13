@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useBookmarks } from '@/lib/bookmarks';
 import { formatViews, timeAgo } from '@/lib/supabase';
+import { videoKey } from '@/lib/video-key';
 import { Bookmark, Eye, ExternalLink, ShoppingBag, Trash2 } from 'lucide-react';
 
 export default function SavedPage() {
@@ -60,17 +61,25 @@ export default function SavedPage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-              {savedVideos.map(video => (
+              {savedVideos.map(video => {
+                const vKey = videoKey(video);
+                // The saved cover_image_url is a signed CDN link that 403s
+                // within a day, so a video saved yesterday showed a broken
+                // image. /api/thumb serves stored bytes by video id, the same
+                // way the Videos page does.
+                const tiktokId = /^\d+$/.test(vKey) ? vKey : null;
+                return (
                 <div
-                  key={video.id}
+                  key={vKey}
                   className="rounded-lg border border-border bg-card overflow-hidden"
-                  data-testid={`saved-video-${video.id}`}
+                  data-testid={`saved-video-${vKey}`}
                 >
                   <div className="relative aspect-[9/16] max-h-[260px] overflow-hidden bg-muted">
-                    {video.cover_image_url ? (
+                    {tiktokId || video.cover_image_url ? (
                       <img
-                        src={video.cover_image_url}
+                        src={tiktokId ? `/api/thumb?vid=${tiktokId}` : video.cover_image_url}
                         alt=""
+                        loading="lazy"
                         className="w-full h-full object-cover"
                       />
                     ) : (
@@ -87,7 +96,7 @@ export default function SavedPage() {
                     <button
                       onClick={() => toggleVideoBookmark(video)}
                       className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center bg-black/50 hover:bg-red-500/80 transition-colors"
-                      data-testid={`remove-video-${video.id}`}
+                      data-testid={`remove-video-${vKey}`}
                     >
                       <Trash2 size={12} className="text-white" />
                     </button>
@@ -126,7 +135,8 @@ export default function SavedPage() {
                     )}
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </>

@@ -41,7 +41,7 @@ export default function SignupPage() {
         <div className="text-center mb-10">
           <Link href="/" className="text-white font-black text-2xl tracking-tighter no-underline">TikBase</Link>
           <h1 className="font-['Space_Grotesk'] text-3xl font-bold text-white mt-6 mb-2">Create your account</h1>
-          <p className="text-[#adaaad] text-sm">Start your 7-day free trial</p>
+          <p className="text-[#adaaad] text-sm">Free to start. No card required.</p>
         </div>
 
         <div className="bg-[#19191c] rounded-2xl p-8">

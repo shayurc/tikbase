@@ -10,6 +10,7 @@
 // any lookup, same honest total, same private cache header.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { resolveTier as resolveSharedTier } from './_lib/resolve-tier.js';
 import { createClient } from '@supabase/supabase-js';
 
 interface CachedResult {
@@ -31,20 +32,13 @@ function getAdminClient() {
   });
 }
 
-const ACTIVE_STATUSES = new Set(['active', 'trialing', 'past_due']);
-
+// One implementation: api/_lib/resolve-tier.ts. This file used to carry its own
+// copy of a security-relevant function (one of four), without the shared
+// version's one-minute memo — so every request here paid two sequential auth
+// round trips, measured at about 400ms, before any data was read.
 async function resolveTier(req: VercelRequest): Promise<'free' | 'paid'> {
   try {
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    if (!token) return 'free';
-    const supabase = getAdminClient();
-    const { data: authData, error: authError } = await supabase.auth.getUser(token);
-    if (authError || !authData.user) return 'free';
-    const { data, error } = await supabase.auth.admin.getUserById(authData.user.id);
-    if (error || !data.user) return 'free';
-    const sub = (data.user.app_metadata as any)?.subscription;
-    return sub?.status && ACTIVE_STATUSES.has(sub.status) ? 'paid' : 'free';
+    return await resolveSharedTier(req, getAdminClient());
   } catch {
     return 'free';
   }

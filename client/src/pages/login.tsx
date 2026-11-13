@@ -85,6 +85,12 @@ export default function LoginPage() {
               />
             </div>
 
+            <div className="text-right -mt-1">
+              <Link href="/forgot-password" className="text-[#adaaad] text-xs no-underline hover:text-primary hover:underline" data-testid="link-forgot-password">
+                Forgot your password?
+              </Link>
+            </div>
+
             {error && (
               <p className="text-[#ff7351] text-sm">{error}</p>
             )}

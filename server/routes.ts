@@ -1,18 +1,22 @@
-import type { Express, Request, Response } from "express";
+import type { Express, Request } from "express";
 import { type Server } from "http";
 import Stripe from "stripe";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import topProductsHandler from "../api/top-products";
 import topVideosHandler from "../api/top-videos";
 import topCreatorsHandler from "../api/top-creators";
+import checkSubscriptionHandler from "../api/check-subscription";
+import createCheckoutSessionHandler from "../api/create-checkout-session";
+import verifySessionHandler from "../api/verify-session";
+import createPortalSessionHandler from "../api/create-portal-session";
 import avatarHandler from "../api/avatar";
 import thumbHandler from "../api/thumb";
+import deleteAccountHandler from "../api/delete-account";
 import creatorSearchHandler from "../api/creator-search";
 import creatorProfileHandler from "../api/creator-profile";
 import productSearchHandler from "../api/product-search";
 import brandSearchHandler from "../api/brand-search";
 import brandProfileHandler from "../api/brand-profile";
-import { isUpstreamOutage, unavailable } from "../api/_lib/upstream.js";
 import productDetailHandler from "../api/product-detail";
 import videoTranscriptHandler from "../api/video-transcript";
 
@@ -30,31 +34,6 @@ function getSupabaseAdmin(): SupabaseClient {
   });
   return cachedAdmin;
 }
-
-// Verify the caller's Supabase access token and return their user id, or null.
-// Never trust a client-supplied user_id for per-user actions.
-/** 'outage' is not the same answer as null: null means "not signed in". */
-async function getAuthedUserId(req: Request): Promise<string | null | "outage"> {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!token) return null;
-  const { data, error } = await getSupabaseAdmin().auth.getUser(token);
-  if (error && isUpstreamOutage(error)) return "outage";
-  if (error || !data.user) return null;
-  return data.user.id;
-}
-
-/** Mirrors api/check-subscription.ts — a 503 is a fact, isPaid:false is a claim. */
-function serveUnavailable(res: Response) {
-  const u = unavailable();
-  res.setHeader("Retry-After", u.retryAfter);
-  res.setHeader("Cache-Control", "no-store");
-  return res.status(u.status).json(u.body);
-}
-
-const ACTIVE_STATUSES = new Set(["active", "trialing", "past_due"]);
-const isPaidStatus = (s: string | null | undefined) =>
-  !!s && ACTIVE_STATUSES.has(s);
 
 interface StoredSubscription {
   status: string;
@@ -148,16 +127,6 @@ async function syncSubscriptionById(
   await writeToUser(userId, sub);
 }
 
-async function getStoredSubscription(
-  userId: string,
-): Promise<StoredSubscription | null> {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase.auth.admin.getUserById(userId);
-  if (error || !data.user) return null;
-  const meta = (data.user.app_metadata as Record<string, any>) || {};
-  return (meta.subscription as StoredSubscription | undefined) ?? null;
-}
-
 // Find a Supabase user id by email (fallback when a purchase carries no
 // supabase_user_id — e.g. a raw Payment Link).
 async function findUserIdByEmail(
@@ -215,63 +184,6 @@ async function recordOrphan(
   } catch (e: any) {
     console.error(`[orphan] recordOrphan threw for ${session.id}: ${e?.message}`);
   }
-}
-
-// Layer B: reconcile-at-login. Self-heal a paying customer whose purchase was
-// never linked (Payment Link paid before signup / mismatched email). Idempotent
-// and throttled (see caller). Logs when it fires.
-const RECONCILE_THROTTLE_MS = 60 * 60 * 1000;
-async function reconcileFromStripe(
-  stripe: Stripe,
-  user: { id: string; email?: string; app_metadata?: Record<string, any> },
-): Promise<StoredSubscription | null> {
-  const email = user.email;
-  if (!email) return null;
-  const supabase = getSupabaseAdmin();
-
-  const custs = await stripe.customers.list({ email, limit: 10 });
-  let sub: Stripe.Subscription | null = null;
-  for (const c of custs.data) {
-    const subs = await stripe.subscriptions.list({
-      customer: c.id,
-      status: "all",
-      limit: 10,
-    });
-    const active = subs.data.find((s) => ACTIVE_STATUSES.has(s.status));
-    if (active) {
-      sub = active;
-      break;
-    }
-  }
-  if (!sub) return null;
-
-  const snap = snapshot(sub);
-  const prev = user.app_metadata || {};
-  await supabase.auth.admin.updateUserById(user.id, {
-    app_metadata: {
-      ...prev,
-      subscription: snap,
-      reconcile_checked_at: new Date().toISOString(),
-    },
-  });
-  await stripe.subscriptions
-    .update(sub.id, {
-      metadata: { ...(sub.metadata || {}), supabase_user_id: user.id },
-    })
-    .catch(() => {});
-  await supabase
-    .from("billing_orphans")
-    .update({
-      status: "resolved",
-      resolved_user_id: user.id,
-      resolved_at: new Date().toISOString(),
-    })
-    .eq("stripe_subscription_id", sub.id)
-    .then(undefined, () => {});
-  console.log(
-    `[reconcile] self-healed access for user ${user.id} via email ${email} → ${sub.id} (${sub.status})`,
-  );
-  return snap;
 }
 
 export async function registerRoutes(
@@ -417,6 +329,16 @@ export async function registerRoutes(
     }
   });
 
+  // ---- Delete account ----
+  app.post("/api/delete-account", async (req, res) => {
+    try {
+      await deleteAccountHandler(req as any, res as any);
+    } catch (err: any) {
+      console.error("delete-account (proxy) error:", err?.message);
+      if (!res.headersSent) res.status(500).json({ error: "delete_failed" });
+    }
+  });
+
   // ---- Stripe webhook: uses req.rawBody (captured by express.json verify in server/index.ts) ----
   app.post("/api/stripe-webhook", async (req: Request, res) => {
     const signature = req.headers["stripe-signature"] as string | undefined;
@@ -490,193 +412,35 @@ export async function registerRoutes(
     }
   });
 
-  // ---- Create Stripe Checkout Session (replaces raw Payment Link URLs) ----
-  app.post("/api/create-checkout-session", async (req, res) => {
-    try {
-      const { plan, email, promo_code } = req.body ?? {};
-      const PRICE_IDS: Record<string, string> = {
-        monthly: "price_1THHz2CmsZejQhLSRBkSjObx",
-        annual: "price_1THHz3CmsZejQhLScuVuKg8o",
-      };
-      if (!plan || !PRICE_IDS[plan]) {
-        return res.status(400).json({ error: "Invalid or missing plan" });
+  // ---- Billing endpoints ----
+  // These four used to be re-implemented here by hand, and the copies drifted.
+  // This file's check-subscription imported isUpstreamOutage; the real
+  // api/check-subscription.ts used it without importing it. So dev worked and
+  // production threw a ReferenceError on every expired token from 2026-08-15,
+  // found on 2026-11-12, with nothing here able to notice. They now run the
+  // exact Vercel handlers, the same as every data endpoint above.
+  //
+  // The webhook above is the one exception: express.json() has already
+  // consumed the request stream that api/stripe-webhook.ts reads its raw body
+  // from, so it keeps its own copy and verifies against req.rawBody.
+  const billingProxies: Array<
+    ["get" | "post", string, (req: any, res: any) => unknown]
+  > = [
+    ["post", "/api/create-checkout-session", createCheckoutSessionHandler],
+    ["post", "/api/verify-session", verifySessionHandler],
+    ["get", "/api/check-subscription", checkSubscriptionHandler],
+    ["post", "/api/create-portal-session", createPortalSessionHandler],
+  ];
+  for (const [method, path, handler] of billingProxies) {
+    app[method](path, async (req, res) => {
+      try {
+        await handler(req as any, res as any);
+      } catch (err: any) {
+        console.error(`${path} (proxy) error:`, err?.message);
+        if (!res.headersSent) res.status(500).json({ error: "Request failed" });
       }
-      const user_id = await getAuthedUserId(req);
-      if (!user_id) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
-
-      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-      const proto = (req.headers["x-forwarded-proto"] as string) || "http";
-      const host = req.headers["x-forwarded-host"] || req.headers.host;
-      const baseUrl = process.env.APP_URL || `${proto}://${host}`;
-
-      // Resolve promo code (human-readable → Stripe promotion_code id)
-      let promoArg: Partial<Stripe.Checkout.SessionCreateParams> = {
-        allow_promotion_codes: true,
-      };
-      if (promo_code) {
-        try {
-          const list = await stripe.promotionCodes.list({
-            code: promo_code,
-            active: true,
-            limit: 1,
-          });
-          if (list.data[0]) {
-            promoArg = { discounts: [{ promotion_code: list.data[0].id }] };
-          }
-        } catch {
-          /* fall through to allow_promotion_codes */
-        }
-      }
-
-      const session = await stripe.checkout.sessions.create({
-        mode: "subscription",
-        line_items: [{ price: PRICE_IDS[plan], quantity: 1 }],
-        client_reference_id: user_id,
-        metadata: { supabase_user_id: user_id },
-        subscription_data: { metadata: { supabase_user_id: user_id } },
-        ...(email ? { customer_email: email } : {}),
-        success_url: `${baseUrl}/?session_id={CHECKOUT_SESSION_ID}#/subscription-success`,
-        cancel_url: `${baseUrl}/#/dashboard/plans`,
-        ...promoArg,
-      });
-
-      return res.json({ url: session.url });
-    } catch (err: any) {
-      console.error("create-checkout-session error:", err.message);
-      return res.status(500).json({ error: "Failed to create checkout session" });
-    }
-  });
-
-  // ---- Verify checkout session (instant confirmation on success page) ----
-  app.post("/api/verify-session", async (req, res) => {
-    try {
-      const { session_id, user_id } = req.body ?? {};
-      if (!session_id || !user_id) {
-        return res
-          .status(400)
-          .json({ error: "session_id and user_id are required" });
-      }
-      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-      const session = await stripe.checkout.sessions.retrieve(session_id);
-
-      if (
-        session.client_reference_id &&
-        session.client_reference_id !== user_id
-      ) {
-        return res
-          .status(403)
-          .json({ error: "Session does not belong to this user" });
-      }
-      if (session.payment_status !== "paid" && session.status !== "complete") {
-        return res.json({ isPaid: false, status: session.status });
-      }
-      const subscriptionId =
-        typeof session.subscription === "string"
-          ? session.subscription
-          : session.subscription?.id;
-      if (!subscriptionId) {
-        return res.json({
-          isPaid: false,
-          reason: "no_subscription_on_session",
-        });
-      }
-      await upsertSubscriptionForUser(stripe, user_id, subscriptionId);
-      return res.json({ isPaid: true });
-    } catch (err: any) {
-      console.error("verify-session error:", err.message);
-      return res.status(500).json({ error: "Failed to verify session" });
-    }
-  });
-
-  // ---- Check subscription by supabase user_id ----
-  app.get("/api/check-subscription", async (req, res) => {
-    try {
-      const userId = await getAuthedUserId(req);
-      if (userId === "outage") return serveUnavailable(res);
-      if (!userId) return res.json({ isPaid: false });
-
-      const supabase = getSupabaseAdmin();
-      const { data, error } = await supabase.auth.admin.getUserById(userId);
-      if (error && isUpstreamOutage(error)) return serveUnavailable(res);
-      if (error || !data.user) return res.json({ isPaid: false });
-      const meta = (data.user.app_metadata as Record<string, any>) || {};
-      let sub: StoredSubscription | undefined = meta.subscription;
-
-      // Layer B: throttled self-heal from Stripe if not already paid.
-      if (!isPaidStatus(sub?.status) && process.env.STRIPE_SECRET_KEY) {
-        const last = meta.reconcile_checked_at
-          ? Date.parse(meta.reconcile_checked_at)
-          : 0;
-        if (Date.now() - last > RECONCILE_THROTTLE_MS) {
-          const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-          const healed = await reconcileFromStripe(stripe, {
-            id: userId,
-            email: data.user.email,
-            app_metadata: meta,
-          });
-          if (healed) {
-            sub = healed;
-          } else {
-            await supabase.auth.admin
-              .updateUserById(userId, {
-                app_metadata: {
-                  ...meta,
-                  reconcile_checked_at: new Date().toISOString(),
-                },
-              })
-              .catch(() => {});
-          }
-        }
-      }
-
-      const referral = (data.user.user_metadata as Record<string, any> | null)?.referral;
-      return res.json({
-        isPaid: isPaidStatus(sub?.status),
-        ...(referral?.code
-          ? {
-              referral: {
-                code: String(referral.code),
-                param: referral.param ?? null,
-                landedAt: referral.landedAt ?? null,
-                signedUpAt: data.user.created_at ?? null,
-              },
-            }
-          : {}),
-      });
-    } catch (err: any) {
-      console.error("check-subscription exception:", err.message);
-      if (isUpstreamOutage(err)) return serveUnavailable(res);
-      return res.json({ isPaid: false });
-    }
-  });
-
-  // ---- Billing portal (by supabase user_id) ----
-  app.post("/api/create-portal-session", async (req, res) => {
-    try {
-      const user_id = await getAuthedUserId(req);
-      if (!user_id)
-        return res.status(401).json({ error: "Unauthorized" });
-
-      const stored = await getStoredSubscription(user_id);
-      if (!stored) {
-        return res
-          .status(404)
-          .json({ error: "No subscription found for this user" });
-      }
-
-      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-      const session = await stripe.billingPortal.sessions.create({
-        customer: stored.stripe_customer_id,
-        return_url: "https://tikbase.io/#/dashboard/billing",
-      });
-      return res.json({ url: session.url });
-    } catch (err: any) {
-      console.error("Portal session error:", err.message);
-      return res.status(500).json({ error: "Failed to create portal session" });
-    }
-  });
+    });
+  }
 
   return httpServer;
 }

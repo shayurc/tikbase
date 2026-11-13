@@ -1,5 +1,5 @@
 // Verification harness for the billing self-heal (Layers B + C).
-// Run: node --env-file=.env pipeline/verify-billing-selfheal.mjs
+// Run: ORPHAN_EMAIL=<buyer's address> node --env-file=.env pipeline/verify-billing-selfheal.mjs
 // REAL against live Stripe/Supabase for detection; SIMULATED (in-memory) for
 // the account-write + idempotency paths so it mutates no real user.
 import Stripe from "stripe";
@@ -9,6 +9,17 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
+// Whose unlinked purchase Layer B should find. A real customer's address used
+// to be hard-coded further down, in a public repository; it is read from the
+// environment now and is never committed. Checked first, so the script cannot
+// write its Layer C test row and then stop halfway.
+const ORPHAN_EMAIL = process.env.ORPHAN_EMAIL;
+if (!ORPHAN_EMAIL) {
+  console.error(
+    "Set ORPHAN_EMAIL to the address of a buyer whose purchase is not linked to an account.",
+  );
+  process.exit(1);
+}
 const ACTIVE = new Set(["active", "trialing", "past_due"]);
 const isPaid = (s) => !!s && ACTIVE.has(s);
 function snapshot(sub) {
@@ -75,7 +86,6 @@ if (insErr) {
 
 // ============ LAYER B: reconcile-at-login catches the real orphan ============
 console.log("\n======== LAYER B: reconcile detection (REAL, live Stripe) ========");
-const ORPHAN_EMAIL = "alidebba9005@student.lvusd.org";
 const custs = await stripe.customers.list({ email: ORPHAN_EMAIL, limit: 10 });
 let realSub = null;
 for (const c of custs.data) {

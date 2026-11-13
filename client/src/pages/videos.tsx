@@ -9,6 +9,7 @@ import {
   type VideoWithProduct,
 } from '@/lib/supabase';
 import { useBookmarks } from '@/lib/bookmarks';
+import { videoKey } from '@/lib/video-key';
 import { useSubscription } from '@/hooks/use-subscription';
 import { Bookmark, ExternalLink, Eye, ShoppingBag, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
 import { LoadingBar } from '@/components/LoadingBar';
@@ -63,8 +64,12 @@ export default function VideosPage() {
   // the current view has loaded, and sequentially, so we don't fire 5 heavy
   // uncached computations at once and starve the foreground request. Disabled
   // while the current view is still loading.
+  //
+  // Pro only. The server pins a free caller to one window whatever is asked
+  // for, so for them this was five more requests for the same ten rows on
+  // every visit — read volume on a project that has already hit its cap once.
   useEffect(() => {
-    if (loading) return;
+    if (loading || !isPaid) return;
     let cancelled = false;
     const others = TIMEFRAMES.filter(t => t.days !== timeframe.days);
     (async () => {
@@ -74,7 +79,7 @@ export default function VideosPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [niche, loading]);
+  }, [niche, loading, isPaid]);
 
   const nicheLabel = NICHES.find(n => n.slug === niche)?.label || niche;
 
@@ -176,13 +181,16 @@ export default function VideosPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {videos.map((video, idx) => {
               const rank = (page - 1) * limit + idx + 1;
-              const bookmarked = isVideoBookmarked(video.id);
+              // video.id does not exist on these rows; it was `undefined` for
+              // every card, as the React key and in each test id.
+              const vKey = videoKey(video);
+              const bookmarked = isVideoBookmarked(video);
 
               return (
                 <div
-                  key={video.id}
+                  key={vKey}
                   className="group rounded-lg border border-border bg-card overflow-hidden hover:border-primary/30 transition-colors"
-                  data-testid={`video-card-${video.id}`}
+                  data-testid={`video-card-${vKey}`}
                 >
                   {/* Thumbnail */}
                   <div className="relative aspect-[9/16] max-h-[280px] overflow-hidden bg-muted">
@@ -248,7 +256,7 @@ export default function VideosPage() {
                         toggleVideoBookmark(video);
                       }}
                       className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center bg-black/50 backdrop-blur-sm hover:bg-black/70 transition-colors"
-                      data-testid={`bookmark-video-${video.id}`}
+                      data-testid={`bookmark-video-${vKey}`}
                     >
                       <Bookmark
                         size={14}
@@ -264,7 +272,7 @@ export default function VideosPage() {
                         target="_blank"
                         rel="noopener noreferrer"
                         className="absolute bottom-2 right-2 w-7 h-7 rounded-full flex items-center justify-center bg-black/50 backdrop-blur-sm hover:bg-black/70 transition-colors cursor-pointer"
-                        data-testid={`link-video-${video.id}`}
+                        data-testid={`link-video-${vKey}`}
                       >
                         <ExternalLink size={12} className="text-white/70" />
                       </a>
