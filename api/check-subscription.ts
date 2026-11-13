@@ -8,6 +8,7 @@ import Stripe from 'stripe';
 // ReferenceError here — and again in the catch block — so the endpoint
 // answered 500 instead of isPaid:false or the 503 this file exists to send.
 import { isUpstreamOutage, unavailable } from './_lib/upstream.js';
+import { appleRecordActive } from './_lib/apple-subscription.js';
 
 // Vercel's @vercel/node builder doesn't bundle TS files outside api/ into the
 // function bundle, so shared helpers are inlined here (and in the other api/*
@@ -125,8 +126,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const meta = (data.user.app_metadata as Record<string, any>) || {};
     let sub = meta.subscription;
 
+    // Pro bought in the iPhone app. Checked first so an Apple subscriber does
+    // not trigger the Stripe self-heal below on every load.
+    const applePaid = appleRecordActive(meta.apple_subscription);
+
     // Layer B: if not already paid, attempt a throttled self-heal from Stripe.
-    if (!(sub?.status && ACTIVE_STATUSES.has(sub.status))) {
+    if (!applePaid && !(sub?.status && ACTIVE_STATUSES.has(sub.status))) {
       const last = meta.reconcile_checked_at
         ? Date.parse(meta.reconcile_checked_at)
         : 0;
@@ -149,7 +154,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    const isPaid = !!sub?.status && ACTIVE_STATUSES.has(sub.status);
+    const isPaid = applePaid || (!!sub?.status && ACTIVE_STATUSES.has(sub.status));
 
     // Referral attribution, surfaced for whoever ends up owning payouts. It is
     // read from user_metadata (the signup writes it there) and echoed only to

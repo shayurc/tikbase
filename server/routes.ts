@@ -12,6 +12,8 @@ import createPortalSessionHandler from "../api/create-portal-session";
 import avatarHandler from "../api/avatar";
 import thumbHandler from "../api/thumb";
 import deleteAccountHandler from "../api/delete-account";
+import appleSubscriptionHandler from "../api/apple-subscription";
+import appleNotificationsHandler from "../api/apple-notifications";
 import creatorSearchHandler from "../api/creator-search";
 import creatorProfileHandler from "../api/creator-profile";
 import productSearchHandler from "../api/product-search";
@@ -430,6 +432,10 @@ export async function registerRoutes(
     ["post", "/api/verify-session", verifySessionHandler],
     ["get", "/api/check-subscription", checkSubscriptionHandler],
     ["post", "/api/create-portal-session", createPortalSessionHandler],
+    // Apple in-app purchase. Both take JSON bodies signed by Apple, so unlike
+    // the Stripe webhook they need no raw body and run the real handlers.
+    ["post", "/api/apple-subscription", appleSubscriptionHandler],
+    ["post", "/api/apple-notifications", appleNotificationsHandler],
   ];
   for (const [method, path, handler] of billingProxies) {
     app[method](path, async (req, res) => {

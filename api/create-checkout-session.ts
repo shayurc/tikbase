@@ -8,6 +8,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 import { ACTIVE_STATUSES } from './_lib/resolve-tier.js';
+import { appleRecordActive } from './_lib/apple-subscription.js';
 
 // Hardcoded live Stripe price IDs. Add new plans here.
 const PRICE_IDS: Record<string, string> = {
@@ -110,6 +111,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(409).json({
         error: 'already_subscribed',
         message: 'You already have TikBase Pro. Manage your subscription from Billing.',
+      });
+    }
+
+    // Already Pro through the iPhone app: a web checkout would bill them twice
+    // for the same thing, once by Apple and once by Stripe.
+    if (appleRecordActive((existing.user.app_metadata as any)?.apple_subscription)) {
+      return res.status(409).json({
+        error: 'already_subscribed',
+        message:
+          'You already have TikBase Pro through the iPhone app. Manage it in your Apple Account settings.',
       });
     }
 

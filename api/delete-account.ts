@@ -18,6 +18,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient } from '@supabase/supabase-js';
 import { ACTIVE_STATUSES } from './_lib/resolve-tier.js';
+import { appleRecordActive } from './_lib/apple-subscription.js';
 
 export const CONFIRM_WORD = 'DELETE';
 
@@ -29,6 +30,8 @@ export type DeleteDecision =
 export function deletionDecision(input: {
   confirm: unknown;
   subscriptionStatus: string | null | undefined;
+  /** A live subscription bought in the iPhone app. Optional for old callers. */
+  appleActive?: boolean;
 }): DeleteDecision {
   if (input.confirm !== CONFIRM_WORD) {
     return {
@@ -45,6 +48,18 @@ export function deletionDecision(input: {
       error: 'subscription_active',
       message:
         'You have an active subscription. Cancel it in Billing first, then delete your account.',
+    };
+  }
+  // Same reasoning for Apple, with one difference that changes the wording:
+  // we cannot cancel an Apple subscription for anyone, and neither can our
+  // Billing page. Only the customer can, in their Apple Account settings.
+  if (input.appleActive) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'subscription_active',
+      message:
+        'You have an active subscription through the iPhone app. Cancel it in your Apple Account settings (Settings, your name, Subscriptions), then delete your account once it has ended.',
     };
   }
   return { ok: true };
@@ -84,6 +99,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const decision = deletionDecision({
       confirm: (req.body ?? {}).confirm,
       subscriptionStatus: (data.user.app_metadata as any)?.subscription?.status,
+      appleActive: appleRecordActive((data.user.app_metadata as any)?.apple_subscription),
     });
     if (!decision.ok) {
       return res.status(decision.status).json({ error: decision.error, message: decision.message });
