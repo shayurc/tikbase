@@ -51,6 +51,21 @@ export const ACTIVE_STATUSES = new Set(['active', 'trialing', 'past_due']);
  * re-resolves.
  */
 const TIER_TTL_MS = 60_000;
+/**
+ * 'free' is remembered for far less time than 'paid'.
+ *
+ * The moment that matters is the upgrade. Someone looks at the free slice,
+ * pays, and comes back seconds later with the SAME token: a 'free' answer
+ * memoised for a minute meant the next requests still got the free slice, and
+ * the product looked like it had taken their money and unlocked nothing. In
+ * the iPhone app the purchase sheet takes about fifteen seconds, so this was
+ * the normal case there, not an edge.
+ *
+ * Ten seconds still spares a free visitor's page load its repeat lookups (a
+ * page fires several requests at once). Paid keeps the full minute: a
+ * cancellation showing up a minute late costs nothing.
+ */
+const FREE_TIER_TTL_MS = 10_000;
 const tierCache = new Map<string, { tier: Tier; expiresAt: number }>();
 
 function tokenKey(token: string): string {
@@ -91,7 +106,10 @@ export async function resolveTier(
     if (tierCache.size > 5000) {
       for (const [k, v] of tierCache) if (now >= v.expiresAt) tierCache.delete(k);
     }
-    tierCache.set(key, { tier, expiresAt: now + TIER_TTL_MS });
+    tierCache.set(key, {
+      tier,
+      expiresAt: now + (tier === 'paid' ? TIER_TTL_MS : FREE_TIER_TTL_MS),
+    });
     return tier;
   } catch {
     return 'free';

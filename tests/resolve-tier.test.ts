@@ -71,3 +71,32 @@ test('a failed lookup answers free but is NOT remembered', async () => {
   assert.equal(await resolveTier(same, healthy.admin), 'paid');
   assert.equal(healthy.calls.getUser, 1);
 });
+
+test('THE UPGRADE: a free answer is forgotten within seconds, so paying unlocks at once', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 10, 13, 12) });
+  const same = req();
+
+  const before = fakeAdmin({ status: null });
+  assert.equal(await resolveTier(same, before.admin), 'free');
+
+  // They pay. Same token, a purchase sheet later.
+  const after = fakeAdmin({ status: 'active' });
+  t.mock.timers.tick(5_000);
+  assert.equal(await resolveTier(same, after.admin), 'free'); // still inside the short memo
+  assert.equal(after.calls.getUser, 0);
+  t.mock.timers.tick(6_000); // 11s after the free answer
+  assert.equal(await resolveTier(same, after.admin), 'paid');
+});
+
+test('a paid answer is still remembered for the full minute', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 10, 13, 13) });
+  const same = req();
+  const f = fakeAdmin({ status: 'active' });
+  assert.equal(await resolveTier(same, f.admin), 'paid');
+  t.mock.timers.tick(50_000);
+  assert.equal(await resolveTier(same, f.admin), 'paid');
+  assert.deepEqual(f.calls, { getUser: 1, getUserById: 1 });
+  t.mock.timers.tick(11_000);
+  await resolveTier(same, f.admin);
+  assert.equal(f.calls.getUser, 2);
+});
