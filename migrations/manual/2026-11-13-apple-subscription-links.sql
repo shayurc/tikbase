@@ -1,9 +1,9 @@
 -- apple_subscription_links: which TikBase account holds an Apple subscription
 -- that was not bought through the app's own purchase call.
 --
--- NOT YET APPLIED to production. Replace this line with the applied date when
--- it is. Until then the endpoints answer 503 for the one case that needs it
--- (see below) and behave normally for everything else.
+-- Applied to production on 2026-11-13, in one transaction. Verified after:
+-- RLS on, no policies, grants to postgres and service_role only, and the
+-- public anon key is refused both a read and an insert (401, 42501).
 --
 -- WHY THIS TABLE EXISTS
 -- A purchase started in the iPhone app carries the buyer's account id inside
