@@ -27,7 +27,9 @@ const FEATURES = [
   { name: 'Brand pages — a shop\u2019s whole catalogue and its 30-day GMV', free: false, pro: true },
   { name: 'Every video driving a product, not just the first three', free: false, pro: true },
   { name: 'Video scripts — the spoken transcript of any video', free: false, pro: true },
-  { name: 'Stock levels and price history', free: false, pro: true },
+  // Was "Stock levels and price history". Stock is on every product row; a
+  // price history view has never been built, so it is not listed.
+  { name: 'Stock levels', free: false, pro: true },
 ];
 
 // Published list prices, checked 2026-08-15. The point of the row is not that
@@ -42,10 +44,13 @@ export default function PlansPage() {
   const [promoCode, setPromoCode] = useState('');
   const monthlyPrice = 44.99;
   const annualPrice = 31.49;
+  // What the annual plan actually charges, once, up front. Must stay equal to
+  // the annual price in api/create-checkout-session.ts (12 x $31.49).
+  const annualTotal = 377.88;
   const currentPrice = annual ? annualPrice : monthlyPrice;
   const savingsPercent = 30;
 
-  const { markStripeOpened } = useSubscription();
+  const { markStripeOpened, isPaid, subscriptionStatus } = useSubscription();
   const { user, session } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,7 +80,9 @@ export default function PlansPage() {
         }),
       });
       const data = await res.json();
-      if (!res.ok || !data.url) throw new Error(data.error || 'Failed to start checkout');
+      // `message` is the sentence written for a person (already subscribed,
+      // could not check the plan); `error` is the machine code.
+      if (!res.ok || !data.url) throw new Error(data.message || data.error || 'Failed to start checkout');
       markStripeOpened();
       window.location.href = data.url;
     } catch (e: any) {
@@ -135,12 +142,15 @@ export default function PlansPage() {
             <span className="text-3xl font-bold font-mono text-foreground">$0</span>
             <span className="text-sm text-muted-foreground ml-1">/mo</span>
           </div>
-          <button
-            className="w-full h-10 rounded-md border border-border text-sm font-medium text-foreground hover:bg-secondary transition-colors mb-6"
+          {/* Not a button: it never did anything. And it only says "Current
+              Plan" once the server has actually said so — it used to say it to
+              Pro customers too. */}
+          <div
+            className="w-full h-10 rounded-md border border-border text-sm font-medium text-foreground flex items-center justify-center mb-6"
             data-testid="btn-current-plan"
           >
-            Current Plan
-          </button>
+            {isPaid ? 'Included in Pro' : subscriptionStatus === 'known' ? 'Current Plan' : 'Free'}
+          </div>
           <ul className="space-y-3">
             {FEATURES.map(f => (
               <li key={f.name} className="flex items-center gap-2.5">
@@ -180,11 +190,35 @@ export default function PlansPage() {
             <span className="text-sm text-muted-foreground ml-1">/mo</span>
           </div>
           {annual && (
-            <p className="text-xs text-muted-foreground mb-4">
-              Billed monthly at ${annualPrice.toFixed(2)}/mo
+            // Said "Billed monthly at $31.49/mo". The annual plan is one charge
+            // of $377.88 — $31.49 is that figure divided by twelve, not a bill.
+            <p className="text-xs text-muted-foreground mb-4" data-testid="annual-billing-note">
+              Billed yearly as one payment of <span className="font-mono">${annualTotal.toFixed(2)}</span>
             </p>
           )}
           {!annual && <div className="mb-4" />}
+          {isPaid ? (
+            <>
+              <div
+                className="w-full h-10 rounded-md border border-primary/30 bg-primary/10 text-sm font-bold text-primary-bright flex items-center justify-center mb-2"
+                data-testid="pro-current-plan"
+              >
+                Your current plan
+              </div>
+              <a
+                href="#/dashboard/billing"
+                className="block text-center text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+                data-testid="link-manage-billing"
+                onClick={(e) => {
+                  e.preventDefault();
+                  window.location.hash = '#/dashboard/billing';
+                }}
+              >
+                Manage your subscription in Billing
+              </a>
+            </>
+          ) : (
+            <>
           {/* Discount code input */}
           <div className="mb-4">
             <div className="flex items-center gap-2">
@@ -213,6 +247,8 @@ export default function PlansPage() {
           </button>
           {error && (
             <p className="text-xs text-red-400 mb-4 text-center" data-testid="upgrade-error">{error}</p>
+          )}
+            </>
           )}
           <div className="mb-6" />
           <ul className="space-y-3">

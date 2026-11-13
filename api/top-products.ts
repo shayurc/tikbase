@@ -937,6 +937,54 @@ async function withCompanionWindows(
   });
 }
 
+/**
+ * The rows a caller may see, in the order they asked for.
+ *
+ * The free slice is cut FIRST, from the default ranking, and only then sorted.
+ * It used to be the other way round: all 400 rows were sorted by the caller's
+ * `sort`/`dir` and the first ten of THAT were returned. niche, days, page and
+ * limit were pinned for free callers; sort was not. Measured on production on
+ * 2026-11-12 with no token: `?sort=sale_price&dir=asc` returned ten products
+ * with no overlap with the free ten, and `?sort=revenue30d` returned the 30-day
+ * ranking — a Pro window. Ten sort keys in two directions is up to twenty
+ * different slices of the Pro list for a logged-out visitor, figures attached.
+ *
+ * A free caller can still re-order the table. They re-order their ten.
+ */
+export function rankForCaller(
+  products: any[],
+  tier: 'free' | 'paid',
+  sortBy: string,
+  sortDir: string,
+): any[] {
+  const pool = tier === 'free' ? products.slice(0, FREE_ROWS) : products;
+  if (sortBy === 'estRevenue' && sortDir === 'desc') return pool;
+  return [...pool].sort((a, b) => {
+    let aVal: number, bVal: number;
+    switch (sortBy) {
+      // -1 for an unknown, the same convention the window columns below
+      // use: it sorts under a genuine 0 rather than over it, so a product
+      // whose stats could not be read never outranks one measured at zero.
+      case 'periodViews': aVal = a.metrics.periodViews ?? -1; bVal = b.metrics.periodViews ?? -1; break;
+      case 'sold_count': aVal = a.metrics.estPeriodUnitsSold ?? -1; bVal = b.metrics.estPeriodUnitsSold ?? -1; break;
+      case 'estRevenue': aVal = a.metrics.estRevenue ?? -1; bVal = b.metrics.estRevenue ?? -1; break;
+      case 'stock_quantity': aVal = a.stock_quantity || 0; bVal = b.stock_quantity || 0; break;
+      // Lifetime units, distinct from 'sold_count' above which is the
+      // window's estimated units.
+      case 'total_sold': aVal = a.sold_count || 0; bVal = b.sold_count || 0; break;
+      case 'sale_price': aVal = a.sale_price || 0; bVal = b.sale_price || 0; break;
+      // New sortable columns. A null window sorts as -1 so "not ranked in
+      // this window" lands below a genuine $0 rather than above it.
+      case 'revenue7d': aVal = a.windows?.['7']?.revenue ?? -1; bVal = b.windows?.['7']?.revenue ?? -1; break;
+      case 'revenue30d': aVal = a.windows?.['30']?.revenue ?? -1; bVal = b.windows?.['30']?.revenue ?? -1; break;
+      case 'distinct_creators': aVal = a.distinct_creators ?? -1; bVal = b.distinct_creators ?? -1; break;
+      case 'affiliate_intensity': aVal = a.affiliate_intensity ?? -1; bVal = b.affiliate_intensity ?? -1; break;
+      default: aVal = 0; bVal = 0;
+    }
+    return sortDir === 'desc' ? bVal - aVal : aVal - bVal;
+  });
+}
+
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse,
@@ -989,34 +1037,10 @@ export default async function handler(
     // absence from a top-400 payload means "not ranked", not "no sales".
     products = await withCompanionWindows(nicheSlug, days, products);
 
-    // Re-sort if requested sort differs from default
-    let sorted = products;
-    if (sortBy !== 'estRevenue' || sortDir !== 'desc') {
-      sorted = [...products].sort((a, b) => {
-        let aVal: number, bVal: number;
-        switch (sortBy) {
-          // -1 for an unknown, the same convention the window columns below
-          // use: it sorts under a genuine 0 rather than over it, so a product
-          // whose stats could not be read never outranks one measured at zero.
-          case 'periodViews': aVal = a.metrics.periodViews ?? -1; bVal = b.metrics.periodViews ?? -1; break;
-          case 'sold_count': aVal = a.metrics.estPeriodUnitsSold ?? -1; bVal = b.metrics.estPeriodUnitsSold ?? -1; break;
-          case 'estRevenue': aVal = a.metrics.estRevenue ?? -1; bVal = b.metrics.estRevenue ?? -1; break;
-          case 'stock_quantity': aVal = a.stock_quantity || 0; bVal = b.stock_quantity || 0; break;
-          // Lifetime units, distinct from 'sold_count' above which is the
-          // window's estimated units.
-          case 'total_sold': aVal = a.sold_count || 0; bVal = b.sold_count || 0; break;
-          case 'sale_price': aVal = a.sale_price || 0; bVal = b.sale_price || 0; break;
-          // New sortable columns. A null window sorts as -1 so "not ranked in
-          // this window" lands below a genuine $0 rather than above it.
-          case 'revenue7d': aVal = a.windows?.['7']?.revenue ?? -1; bVal = b.windows?.['7']?.revenue ?? -1; break;
-          case 'revenue30d': aVal = a.windows?.['30']?.revenue ?? -1; bVal = b.windows?.['30']?.revenue ?? -1; break;
-          case 'distinct_creators': aVal = a.distinct_creators ?? -1; bVal = b.distinct_creators ?? -1; break;
-          case 'affiliate_intensity': aVal = a.affiliate_intensity ?? -1; bVal = b.affiliate_intensity ?? -1; break;
-          default: aVal = 0; bVal = 0;
-        }
-        return sortDir === 'desc' ? bVal - aVal : aVal - bVal;
-      });
-    }
+    // Tier decides the rows before the caller's sort is applied — see
+    // rankForCaller. `products` is still the full ranking; it is only used
+    // below for the honest total.
+    const sorted = rankForCaller(products, tier, sortBy, sortDir);
 
     const offset = (page - 1) * limit;
     // Per-user (tiered) responses must never be shared by the CDN, which caches
@@ -1043,7 +1067,7 @@ export default async function handler(
 
     return res.json({
       products: sorted.slice(offset, offset + limit),
-      total: sorted.length, // honest full count even when the page is truncated
+      total: products.length, // honest full count even when the page is truncated
       page,
       limit,
     });
