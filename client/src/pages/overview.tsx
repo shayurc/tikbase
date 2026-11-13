@@ -58,15 +58,23 @@ export default function OverviewPage() {
   const [products, setProducts] = useState<EnrichedProduct[]>([]);
   const [videos, setVideos] = useState<VideoWithProduct[]>([]);
   const [loading, setLoading] = useState(true);
+  // A failed half is remembered as failed, not swallowed into an empty list
+  // that then renders as "No products in this view yet".
+  const [productsFailed, setProductsFailed] = useState(false);
+  const [videosFailed, setVideosFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     Promise.all([
-      fetchTop5Products('all', timeframe.days).catch(() => [] as EnrichedProduct[]),
-      fetchTopVideos('all', timeframe.days, 1, 5).then(r => r.videos).catch(() => [] as VideoWithProduct[]),
+      fetchTop5Products('all', timeframe.days).then(p => ({ ok: true, rows: p })).catch(() => ({ ok: false, rows: [] as EnrichedProduct[] })),
+      fetchTopVideos('all', timeframe.days, 1, 5).then(r => ({ ok: true, rows: r.videos })).catch(() => ({ ok: false, rows: [] as VideoWithProduct[] })),
     ]).then(([p, v]) => {
-      if (!cancelled) { setProducts(p); setVideos(v); setLoading(false); }
+      if (!cancelled) {
+        setProducts(p.rows); setProductsFailed(!p.ok);
+        setVideos(v.rows); setVideosFailed(!v.ok);
+        setLoading(false);
+      }
     });
     return () => { cancelled = true; };
   }, [timeframe.days]);
@@ -97,7 +105,7 @@ export default function OverviewPage() {
             </div>
 
             {products.length === 0 ? (
-              <EmptyRow icon={<Package size={18} className="text-muted-foreground" />} text="No products in this view yet" />
+              <EmptyRow icon={<Package size={18} className="text-muted-foreground" />} text={productsFailed ? "Couldn't load products. This is a problem on our side, not an empty result." : "No products in this view yet"} />
             ) : (
               <div className="rounded-lg border border-border bg-card overflow-x-auto">
                 <table className="w-full text-sm">
@@ -187,7 +195,7 @@ export default function OverviewPage() {
             </div>
 
             {videos.length === 0 ? (
-              <EmptyRow icon={<Eye size={18} className="text-muted-foreground" />} text="No videos in this view yet" />
+              <EmptyRow icon={<Eye size={18} className="text-muted-foreground" />} text={videosFailed ? "Couldn't load videos. This is a problem on our side, not an empty result." : "No videos in this view yet"} />
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
                 {videos.map((video, idx) => {

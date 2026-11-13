@@ -4,11 +4,13 @@ import {
   TIMEFRAMES,
   formatViews,
   authHeader,
+  cacheScope,
   type Product,
   type ProductVideo,
 } from '@/lib/supabase';
 import { formatCompactNumber, type ProductEstimates } from '@/lib/estimates';
 import { InfoTip } from '@/components/InfoTip';
+import { LoadFailed } from '@/components/LoadFailed';
 import { useBookmarks } from '@/lib/bookmarks';
 import { useSubscription } from '@/hooks/use-subscription';
 import { Bookmark, ChevronLeft, ChevronRight, ExternalLink, ChevronUp, ChevronDown, TrendingUp, Lock, Package, Sparkles } from 'lucide-react';
@@ -50,7 +52,10 @@ const PRODUCT_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 async function fetchProducts(
   niche: string, days: number, page: number, limit: number, sort: string, dir: string
 ): Promise<{ products: EnrichedProduct[]; total: number }> {
-  const cacheKey = `${niche}:${days}:${page}:${limit}:${sort}:${dir}`;
+  // Scoped to the account, like the videos and creators caches: keyed on the
+  // query alone, this served one account's rows to the next person to sign in
+  // on the same browser.
+  const cacheKey = `${await cacheScope()}:${niche}:${days}:${page}:${limit}:${sort}:${dir}`;
   const cached = productCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < PRODUCT_CACHE_TTL) return cached.data;
 
@@ -116,6 +121,8 @@ export default function ProductsPage() {
   const [pageProducts, setPageProducts] = useState<EnrichedProduct[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [sortKey, setSortKey] = useState<SortKey>('estRevenue');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [mode, setMode] = useState<'bestsellers' | 'trending'>('bestsellers');
@@ -149,12 +156,16 @@ export default function ProductsPage() {
     }
   }, [isPaid]);
 
-  useEffect(() => { setPage(1); }, [timeframe, sortKey, sortDir]);
+  // niche too: it was missing, so changing category from page 3 asked for
+  // page 3 of a category that might have one page — a blank table and, with no
+  // rows, no pager to get back.
+  useEffect(() => { setPage(1); }, [niche, timeframe, sortKey, sortDir]);
 
   // Fetch products from server-side endpoint
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setFailed(false);
     fetchProducts(niche, timeframe.days, page, limit, sortKey, sortDir)
       .then(res => {
         if (!cancelled) {
@@ -164,16 +175,19 @@ export default function ProductsPage() {
         }
       })
       .catch(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) { setPageProducts([]); setTotal(0); setFailed(true); setLoading(false); }
       });
     return () => { cancelled = true; };
-  }, [niche, timeframe, page, sortKey, sortDir]);
+  }, [niche, timeframe, page, sortKey, sortDir, attempt]);
 
   // Pre-fetch the OTHER timeframes for snappier tab switching — but only after
   // the current view has loaded, and sequentially, so we don't fire several
   // heavy uncached computations at once and starve the foreground request.
+  //
+  // Pro only: a free caller is pinned to one window server-side, so for them
+  // this was five more requests for the same ten rows on every visit.
   useEffect(() => {
-    if (loading) return;
+    if (loading || !isPaid) return;
     let cancelled = false;
     const others = TIMEFRAMES.filter(t => t.days !== timeframe.days);
     (async () => {
@@ -183,7 +197,7 @@ export default function ProductsPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [niche, loading]);
+  }, [niche, loading, isPaid]);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDir(d => d === 'desc' ? 'asc' : 'desc');
@@ -290,7 +304,9 @@ export default function ProductsPage() {
 
       {loading && <LoadingBar loading={loading} />}
 
-      {!loading && total === 0 && (
+      {!loading && failed && <LoadFailed what="products" onRetry={() => setAttempt(a => a + 1)} />}
+
+      {!loading && !failed && total === 0 && (
         <div className="flex flex-col items-center text-center py-20 px-6">
           <div className="w-11 h-11 rounded-full bg-secondary/60 flex items-center justify-center mb-3">
             <Package size={20} className="text-muted-foreground" />

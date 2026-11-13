@@ -386,6 +386,32 @@ export interface WindowStat {
 }
 
 const windowStatsCache = new Map<number, { stats: Map<string, WindowStat>; timestamp: number }>();
+// Products whose window-stats chunk FAILED, per window. Absence from `stats`
+// has two meanings — "no videos in the window" (a real zero) and "we could not
+// ask" — and only this set tells them apart.
+const windowStatsUnknown = new Map<number, Set<string>>();
+
+/**
+ * Creator and video counts for one product, or nulls when its chunk failed.
+ *
+ * The comment at the failure site has always said "the affected products
+ * report null and the UI renders an em dash". The code said `?? 0`: a failed
+ * chunk published 500 products as having 0 creators, and 0 is at or under any
+ * median, so every one of them with real sales earned an Opportunity badge
+ * ("proven demand, few creators on it") on the strength of a timeout.
+ */
+export function windowCountsFor(
+  stats: Map<string, WindowStat>,
+  unknown: Set<string> | undefined,
+  productId: string,
+): { distinct_creators: number | null; window_video_count: number | null } {
+  if (unknown?.has(productId)) return { distinct_creators: null, window_video_count: null };
+  const ws = stats.get(productId);
+  return {
+    distinct_creators: ws?.distinctCreators ?? 0,
+    window_video_count: ws?.windowVideos ?? 0,
+  };
+}
 
 // Products per RPC call. Sized empirically: at 2000 the widest window (365d)
 // still lost a chunk to the statement timeout, so it is 500 — every chunk then
@@ -435,6 +461,8 @@ export async function loadWindowStats(days: number): Promise<Map<string, WindowS
 
   const supabase = getAdminClient();
   const stats = new Map<string, WindowStat>();
+  const unknown = new Set<string>();
+  windowStatsUnknown.set(days, unknown);
 
   const ids = await loadAllProductIds(supabase);
   if (ids.length === 0) return stats;
@@ -452,6 +480,7 @@ export async function loadWindowStats(days: number): Promise<Map<string, WindowS
       console.warn(
         `  [WARN] product_window_stats(${days}) chunk ${i / WINDOW_STATS_CHUNK} failed: ${error.message}`,
       );
+      for (const id of chunk) unknown.add(String(id));
       continue;
     }
     for (const r of (data as any[]) || []) {
@@ -800,8 +829,7 @@ export async function computeTopProducts(
       ...p,
       metrics,
       topVideos,
-      distinct_creators: ws?.distinctCreators ?? 0,
-      window_video_count: ws?.windowVideos ?? 0,
+      ...windowCountsFor(windowStats, windowStatsUnknown.get(days), String(p.product_id)),
       affiliate_intensity: affiliateIntensity,
     };
   });
@@ -1014,11 +1042,27 @@ export default async function handler(
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
       products = cached.products;
     } else {
-      // Prefer the daily precomputed ranking (instant read). Fall back to live
-      // computation only if this niche/timeframe hasn't been precomputed yet.
+      // Served from the nightly precompute, and only from it — the same rule
+      // api/top-creators.ts has always had. This used to fall back to
+      // computeTopProducts() inside the request whenever the read came back
+      // empty-handed: ~2,700 sequential RPCs and about ten minutes for 'all'
+      // (measured 2026-11-13), in a function that is cut off long before that.
+      // Worse, when the reads were failing fast it produced [] and cached that
+      // for an hour, so the page said "no products" after the outage was over.
+      // And `niche` is caller-supplied: any made-up value started a compute and
+      // left an entry in this map.
       const pre = await readPrecomputed(nicheSlug, days);
-      products = pre ?? (await computeTopProducts(nicheSlug, days));
-      cache.set(cacheKey, { products, timestamp: Date.now() });
+      if (!pre) {
+        res.setHeader('Retry-After', '60');
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(503).json({
+          error: 'ranking_unavailable',
+          message: 'This ranking is not available right now. This is not an answer about the data.',
+        });
+      }
+      products = pre;
+      // An empty payload is not worth remembering for an hour.
+      if (products.length > 0) cache.set(cacheKey, { products, timestamp: Date.now() });
     }
 
     // Dual-window merge. The table shows 7d AND 30d revenue side by side

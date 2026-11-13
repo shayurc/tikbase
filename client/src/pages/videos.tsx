@@ -13,6 +13,7 @@ import { videoKey } from '@/lib/video-key';
 import { useSubscription } from '@/hooks/use-subscription';
 import { Bookmark, ExternalLink, Eye, ShoppingBag, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
 import { LoadingBar } from '@/components/LoadingBar';
+import { LoadFailed } from '@/components/LoadFailed';
 import { InfoTip } from '@/components/InfoTip';
 import { OnboardingBanner } from '@/components/OnboardingBanner';
 
@@ -24,6 +25,8 @@ export default function VideosPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const { isVideoBookmarked, toggleVideoBookmark } = useBookmarks();
   const { isPaid, showPaywall } = useSubscription();
 
@@ -46,6 +49,7 @@ export default function VideosPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setFailed(false);
     fetchTopVideos(niche, timeframe.days, page, limit)
       .then(res => {
         if (!cancelled) {
@@ -55,10 +59,12 @@ export default function VideosPage() {
         }
       })
       .catch(() => {
-        if (!cancelled) setLoading(false);
+        // Not "no videos": the previous page's rows must not stay up under a
+        // new filter either, so clear them and say the load failed.
+        if (!cancelled) { setVideos([]); setTotal(0); setFailed(true); setLoading(false); }
       });
     return () => { cancelled = true; };
-  }, [niche, timeframe, page]);
+  }, [niche, timeframe, page, attempt]);
 
   // Pre-fetch the OTHER timeframes for snappier tab switching — but only after
   // the current view has loaded, and sequentially, so we don't fire 5 heavy
@@ -160,7 +166,9 @@ export default function VideosPage() {
       {loading && <LoadingBar loading={loading} />}
 
       {/* Video grid */}
-      {!loading && videos.length === 0 && (
+      {!loading && failed && <LoadFailed what="videos" onRetry={() => setAttempt(a => a + 1)} />}
+
+      {!loading && !failed && videos.length === 0 && (
         <div className="flex flex-col items-center text-center py-20 px-6">
           <div className="w-11 h-11 rounded-full bg-secondary/60 flex items-center justify-center mb-3">
             <Eye size={20} className="text-muted-foreground" />
