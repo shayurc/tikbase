@@ -195,7 +195,7 @@ export default function OverviewPage() {
                   const postDate = extractPostDate(video.video_url);
                   const vidId = video.video_url?.match(/video\/(\d+)/)?.[1];
                   return (
-                    <div key={video.id} className="rounded-lg border border-border bg-card overflow-hidden" data-testid={`overview-video-${rank}`}>
+                    <div key={vidId ?? `rank-${rank}`} className="rounded-lg border border-border bg-card overflow-hidden" data-testid={`overview-video-${rank}`}>
                       <div className="relative aspect-[9/16] max-h-[220px] overflow-hidden bg-muted">
                         {(vidId || video.cover_image_url) ? (
                           <img src={vidId ? `/api/thumb?vid=${vidId}` : (video.cover_image_url || '')} alt="" className="w-full h-full object-cover" loading="lazy" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
