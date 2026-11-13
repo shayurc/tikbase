@@ -72,6 +72,72 @@ jobs:
           fi
           echo "All endpoints answered."
 
+      # The three checks below each guard something that was broken in
+      # production in 2026 and that the probe above could not see.
+
+      - name: A rejected token is answered, not crashed on
+        run: |
+          BASE="${BASE_URL:-https://tikbase.io}"
+          # From 2026-08-15 to 2026-11-13 this returned 500: the handler used
+          # two functions it never imported, and the no-token probe above
+          # returns before reaching them.
+          code=$(curl -s -o /tmp/body -w "%{http_code}" -m 45 -H "Authorization: Bearer not-a-real-token" "$BASE/api/check-subscription" || echo 000)
+          body=$(head -c 200 /tmp/body)
+          echo "  $code  $body"
+          if [ "$code" != "200" ] || [ "$body" != '{"isPaid":false}' ]; then
+            echo "::error::check-subscription mishandles an invalid token (wanted 200 {\"isPaid\":false})"
+            exit 1
+          fi
+
+      - name: Sort order does not widen the free slice
+        run: |
+          BASE="${BASE_URL:-https://tikbase.io}"
+          # Logged out, every sort must return the same ten products. Until
+          # 2026-11-13 the caller's sort was applied before the free cut, so
+          # ?sort= paged through the Pro list.
+          ids() { curl -s -m 60 "$BASE/api/top-products?niche=all&days=7$1" | grep -oE '"product_id":"[0-9]+"' | sort | tr '\n' ' '; }
+          base=$(ids "")
+          if [ -z "$base" ]; then echo "::error::no products returned"; exit 1; fi
+          for q in "&sort=sale_price&dir=asc" "&sort=revenue30d&dir=desc" "&sort=total_sold&dir=desc"; do
+            got=$(ids "$q")
+            if [ "$got" != "$base" ]; then
+              echo "::error::free callers see different products with $q"
+              exit 1
+            fi
+            echo "  ok  $q"
+          done
+
+      - name: The public key cannot read the paid tables
+        run: |
+          # The anon key ships in the client bundle, so anyone has it. These
+          # tables must answer it with nothing (row-level security) or refuse
+          # it outright. No secret is used here: this IS the public key, read
+          # from the deployed page the way a visitor's browser gets it.
+          BASE="${BASE_URL:-https://tikbase.io}"
+          asset=$(curl -s -m 30 "$BASE" | grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' | head -1)
+          curl -s -m 60 "$BASE$asset" -o /tmp/app.js
+          SB=$(grep -oE 'https://[a-z0-9]+\.supabase\.co' /tmp/app.js | head -1)
+          KEY=$(grep -oE 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' /tmp/app.js | head -1)
+          if [ -z "$SB" ] || [ -z "$KEY" ]; then echo "::error::could not find the public Supabase URL/key in the bundle"; exit 1; fi
+          fail=0
+          # `creators` is deliberately absent: it is readable today and is
+          # tracked separately. Add it here once it is locked.
+          for t in rankings_cache creator_rankings billing_orphans products product_snapshots product_videos video_transcripts transcript_spend search_misses product_revenue_30d; do
+            code=$(curl -s -o /tmp/rows -w "%{http_code}" -m 30 -H "apikey: $KEY" -H "Authorization: Bearer $KEY" "$SB/rest/v1/$t?select=*&limit=1" || echo 000)
+            rows=$(head -c 120 /tmp/rows)
+            if [ "$code" = "200" ] && [ "$rows" != "[]" ]; then
+              printf "  FAIL  %s is readable with the public key\n" "$t"; fail=1
+            elif [ "$code" = "200" ] || [ "$code" = "401" ] || [ "$code" = "403" ] || [ "$code" = "404" ]; then
+              printf "  ok    %-3s %s\n" "$code" "$t"
+            else
+              printf "  ??    %-3s %s (could not tell)\n" "$code" "$t"
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::A paid or private table is readable by anyone — see the FAIL lines above"
+            exit 1
+          fi
+
       - name: Confirm the deployed bundle is not stale
         run: |
           BASE="${BASE_URL:-https://tikbase.io}"

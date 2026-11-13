@@ -123,3 +123,20 @@ test('the auth server answers 503: passed on as 503', async (t) => {
   assert.equal(res.statusCode, 503);
   assert.equal(res.body.error, 'service_unavailable');
 });
+
+test('missing configuration: 503 for a signed-in caller, never isPaid:false', async (t) => {
+  isolate(t, (async () => { throw new Error('should not be called'); }) as any);
+  delete process.env.SUPABASE_URL;
+  delete process.env.VITE_SUPABASE_URL;
+  delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  const res = fakeRes();
+  await handler(withToken, res as any);
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.isPaid, undefined);
+
+  // Signed-out still needs no backend at all.
+  const anon = fakeRes();
+  await handler({ headers: {}, query: {} } as any, anon as any);
+  assert.deepEqual(anon.body, { isPaid: false });
+});

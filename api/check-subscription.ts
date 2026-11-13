@@ -98,19 +98,27 @@ async function reconcileFromStripe(
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !key) return res.json({ isPaid: false });
-
-    const supabase = createClient(url, key, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-
     // Derive the user from the verified access token — never trust a
     // client-supplied user_id (that would let anyone read any user's status).
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    // Nobody signed in is an answer, and needs no backend to give.
     if (!token) return res.json({ isPaid: false });
+
+    // Missing configuration used to answer isPaid:false here — every paying
+    // customer told they are not paying because an environment variable was
+    // dropped in a deploy. That is "could not ask", so it is a 503, the same as
+    // an unreachable database.
+    const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) {
+      console.error('check-subscription: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing');
+      return serveUnavailable(res);
+    }
+
+    const supabase = createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
     const { data: authData, error: authError } = await supabase.auth.getUser(token);
     // A token we cannot CHECK is different from a token that is invalid. Only
     // the second one means "free".
