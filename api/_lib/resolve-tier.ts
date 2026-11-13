@@ -30,12 +30,27 @@
  */
 import { createHash } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { appleRecordActive } from './apple-subscription.js';
 
 export type Tier = 'free' | 'paid';
 
 /** Stripe subscription statuses that count as paying. Exported so the checkout
  *  guard and the tier gate cannot disagree about who already has a plan. */
 export const ACTIVE_STATUSES = new Set(['active', 'trialing', 'past_due']);
+
+/**
+ * The one answer to "is this account Pro?". Two records can say yes: the
+ * Stripe subscription the website sells, and the Apple subscription the
+ * iPhone app sells (see apple-subscription.ts for why they are kept apart).
+ * Every gate asks here so the two cannot be honoured in one place and
+ * forgotten in another.
+ */
+export function hasPaidAccess(appMetadata: unknown, now: number = Date.now()): boolean {
+  const meta = appMetadata as Record<string, any> | null | undefined;
+  const status = meta?.subscription?.status;
+  if (status && ACTIVE_STATUSES.has(status)) return true;
+  return appleRecordActive(meta?.apple_subscription, now);
+}
 
 /**
  * Short-lived token -> tier memo.
@@ -96,9 +111,7 @@ export async function resolveTier(
     if (authError || !authData.user) return 'free';
     const { data, error } = await admin.auth.admin.getUserById(authData.user.id);
     if (error || !data.user) return 'free';
-    const sub = (data.user.app_metadata as any)?.subscription;
-    const tier: Tier =
-      sub?.status && ACTIVE_STATUSES.has(sub.status) ? 'paid' : 'free';
+    const tier: Tier = hasPaidAccess(data.user.app_metadata) ? 'paid' : 'free';
 
     // Only successful resolutions are memoised. A failure path returns 'free'
     // without caching, so a transient auth blip cannot pin a paying customer to
