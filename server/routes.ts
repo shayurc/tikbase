@@ -5,6 +5,10 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import topProductsHandler from "../api/top-products";
 import topVideosHandler from "../api/top-videos";
 import topCreatorsHandler from "../api/top-creators";
+import checkSubscriptionHandler from "../api/check-subscription";
+import createCheckoutSessionHandler from "../api/create-checkout-session";
+import verifySessionHandler from "../api/verify-session";
+import createPortalSessionHandler from "../api/create-portal-session";
 import avatarHandler from "../api/avatar";
 import thumbHandler from "../api/thumb";
 import creatorSearchHandler from "../api/creator-search";
@@ -14,10 +18,6 @@ import brandSearchHandler from "../api/brand-search";
 import brandProfileHandler from "../api/brand-profile";
 import productDetailHandler from "../api/product-detail";
 import videoTranscriptHandler from "../api/video-transcript";
-import checkSubscriptionHandler from "../api/check-subscription";
-import createCheckoutSessionHandler from "../api/create-checkout-session";
-import verifySessionHandler from "../api/verify-session";
-import createPortalSessionHandler from "../api/create-portal-session";
 
 // ---- Supabase admin client (service role, server-only) ----
 let cachedAdmin: SupabaseClient | null = null;
