@@ -36,6 +36,54 @@ export async function readAllPages<T>(
 }
 
 /**
+ * The same job by keyset: "the next page after this key", ordered by a unique
+ * column. Offset paging makes the database sort and skip everything before the
+ * page on every request, so reading a 650k-row table that way costs the whole
+ * table again per page. A keyset page is one index range scan however deep it
+ * is, which is what makes reading every row affordable.
+ *
+ * `fetchAfter(null)` is the first page. `keyOf` must be the column the query
+ * orders by.
+ */
+export async function forEachKeyPage<T>(
+  fetchAfter: (lastKey: string | null, pageSize: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  keyOf: (row: T) => string,
+  onPage: (rows: T[]) => void,
+  opts: { pageSize?: number; maxRows?: number; what?: string } = {},
+): Promise<number> {
+  const pageSize = opts.pageSize ?? POSTGREST_PAGE;
+  const maxRows = opts.maxRows ?? 5_000_000;
+  let seen = 0;
+  let last: string | null = null;
+  while (seen < maxRows) {
+    const { data, error } = await fetchAfter(last, pageSize);
+    if (error) {
+      throw new Error(`${opts.what ?? 'keyset read'} failed after ${seen} rows: ${error.message}`);
+    }
+    if (!data || data.length === 0) break;
+    onPage(data);
+    seen += data.length;
+    const next = keyOf(data[data.length - 1]);
+    // A key that does not advance would loop forever on the same page.
+    if (next === last) throw new Error(`${opts.what ?? 'keyset read'}: key did not advance past ${last}`);
+    last = next;
+    if (data.length < pageSize) break;
+  }
+  return seen;
+}
+
+/** forEachKeyPage, collected. Use the callback form when the rows are many. */
+export async function readAllByKey<T>(
+  fetchAfter: (lastKey: string | null, pageSize: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  keyOf: (row: T) => string,
+  opts: { pageSize?: number; maxRows?: number; what?: string } = {},
+): Promise<T[]> {
+  const rows: T[] = [];
+  await forEachKeyPage(fetchAfter, keyOf, (page) => { rows.push(...page); }, opts);
+  return rows;
+}
+
+/**
  * Is this a plausible post time? TikTok ids encode it; a malformed id decodes
  * to nonsense. The upper bound used to be the literal year 2027, which would
  * have emptied every video ranking on 2028-01-01. It is "not in the future"

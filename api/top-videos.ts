@@ -8,7 +8,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { resolveTier as resolveSharedTier } from './_lib/resolve-tier.js';
 import { createClient } from '@supabase/supabase-js';
-import { readAllPages, plausiblePostDate } from './_lib/paging.js';
+import { readAllByKey, forEachKeyPage, plausiblePostDate } from './_lib/paging.js';
 
 interface CachedResult {
   videos: any[];
@@ -60,84 +60,164 @@ async function readPrecomputed(nicheSlug: string, days: number): Promise<any[] |
   }
 }
 
-export async function computeTopVideos(nicheSlug: string, days: number): Promise<any[]> {
+/** Longest window the app offers; nothing older is ever ranked. */
+const MAX_WINDOW_DAYS = 365;
+// Only what the payload uses. `select('*')` also dragged discovery_source,
+// like_count, ad_label, posted_at, video_id and post_ts across the wire for
+// every one of 650k rows. `id` is here to page by and is dropped after.
+const VIDEO_COLUMNS =
+  'id,product_id,video_url,view_count,author_name,author_avatar_url,creator_key,cover_image_url,created_at';
+
+export interface PooledVideo {
+  product_id: string;
+  video_url: string;
+  view_count: number | null;
+  postedAt: number;
+  [column: string]: unknown;
+}
+
+/**
+ * Raw rows -> one entry per video, dated, newest-window-first is NOT applied
+ * here. Rows with no TikTok id in the URL, an implausible post time, or a post
+ * time older than the longest window are dropped. Where the same video appears
+ * on several rows (one per product it promotes), the most-viewed row wins —
+ * what the old view_count-ordered read did implicitly.
+ */
+export function videoPoolBuilder(now: number = Date.now()) {
+  const oldest = now - MAX_WINDOW_DAYS * 86400000;
+  const best = new Map<string, PooledVideo>();
+  return {
+    /** Fold a page in. Rows are reduced as they arrive, so the raw table is
+     *  never held in memory — only the videos that can still be ranked. */
+    add(rows: any[]) {
+      for (const row of rows) {
+        const vidId = row.video_url?.match(/video\/(\d+)/)?.[1];
+        if (!vidId) continue;
+        const posted = extractPostDate(row.video_url);
+        if (!posted) continue;
+        const postedAt = posted.getTime();
+        if (postedAt < oldest) continue;
+        const prev = best.get(vidId);
+        if (prev && (prev.view_count || 0) >= (row.view_count || 0)) continue;
+        const { id: _id, ...rest } = row;
+        best.set(vidId, { ...rest, postedAt });
+      }
+    },
+    finish(): PooledVideo[] {
+      return [...best.values()];
+    },
+  };
+}
+
+export function buildVideoPool(rows: any[], now: number = Date.now()): PooledVideo[] {
+  const builder = videoPoolBuilder(now);
+  builder.add(rows);
+  return builder.finish();
+}
+
+/** The videos of one window, most-viewed first. */
+export function rankVideoWindow(pool: PooledVideo[], days: number, now: number = Date.now()): PooledVideo[] {
+  const cutoff = now - days * 86400000;
+  return pool
+    .filter((v) => v.postedAt >= cutoff)
+    .sort((a, b) => (b.view_count || 0) - (a.view_count || 0));
+}
+
+/**
+ * Every video of a niche, read ONCE.
+ *
+ * The nightly precompute asks for six windows per niche, one after another,
+ * and each call used to read the niche's videos from scratch — for 'all', the
+ * whole table six times. The window is only a filter on the post date, which
+ * is in the row. So the rows are read once, kept for the niche being worked
+ * on, and each window is a filter over them in memory.
+ *
+ * That is also what pays for reading every row (the 1000-row cap fix): one
+ * complete read per niche is fewer rows than six capped ones.
+ *
+ * One niche is held at a time, so memory is bounded by the largest niche.
+ */
+const POOL_TTL = 15 * 60 * 1000;
+let pooled: { niche: string; loadedAt: number; videos: Promise<PooledVideo[]> } | null = null;
+
+async function readNicheVideos(nicheSlug: string): Promise<PooledVideo[]> {
   const supabase = getAdminClient();
+  const pool = videoPoolBuilder();
 
-  const cutoffDate = new Date(Date.now() - days * 86400000);
-
-  // Step 1: Get product_ids with sold_count > 0 for the niche
-  let productIds: string[] = [];
-  if (nicheSlug !== 'all') {
-    let offset = 0;
-    while (true) {
-      const { data } = await supabase
-        .from('products')
-        .select('product_id')
-        .eq('niche_slug', nicheSlug)
-        .gt('sold_count', 0)
-        .range(offset, offset + 999);
-      if (!data || data.length === 0) break;
-      productIds = productIds.concat(data.map((p: any) => p.product_id));
-      if (data.length < 1000) break;
-      offset += 1000;
-    }
-  }
-
-  // Step 2: Fetch all videos (for "all") or niche videos
-  let allVideos: any[] = [];
-  // Every read below goes through readAllPages. The niche branch used to ask
-  // for `.limit(5000)` per 150-product batch and silently receive 1000 — the
-  // most-viewed of all time — before the window filter ran, so recent videos
-  // were crowded out by old ones. Both branches also sorted on view_count
-  // alone, which is not a total order: rows that tie can repeat or go missing
-  // between pages. video_url breaks the tie.
   if (nicheSlug === 'all') {
-    allVideos = await readAllPages<any>(
-      (from, to) =>
-        supabase
-          .from('product_videos')
-          .select('*')
-          .order('view_count', { ascending: false })
-          .order('video_url', { ascending: true })
-          .range(from, to),
+    await forEachKeyPage<any>(
+      (last, size) => {
+        let q = supabase.from('product_videos').select(VIDEO_COLUMNS).order('id', { ascending: true }).limit(size);
+        if (last) q = q.gt('id', last);
+        return q;
+      },
+      (r) => r.id,
+      (page) => pool.add(page),
       { what: 'product_videos (all niches)' },
     );
   } else {
-    // Batch by product_ids
+    // Products with sales in this niche. Ordered, so pages cannot overlap, and
+    // a failed page throws rather than quietly shrinking the niche.
+    const products = await readAllByKey<any>(
+      (last, size) => {
+        let q = supabase
+          .from('products')
+          .select('product_id')
+          .eq('niche_slug', nicheSlug)
+          .gt('sold_count', 0)
+          .order('product_id', { ascending: true })
+          .limit(size);
+        if (last) q = q.gt('product_id', last);
+        return q;
+      },
+      (r) => r.product_id,
+      { what: `products (${nicheSlug})` },
+    );
+    const productIds: string[] = products.map((p) => p.product_id);
+
+    // The old read asked for `.limit(5000)` per 150-product batch and silently
+    // received 1000 — the most-viewed of all time — before the window filter
+    // ran, so recent videos were crowded out by old ones.
     for (let i = 0; i < productIds.length; i += 150) {
       const batch = productIds.slice(i, i + 150);
-      const rows = await readAllPages<any>(
-        (from, to) =>
-          supabase
+      await forEachKeyPage<any>(
+        (last, size) => {
+          let q = supabase
             .from('product_videos')
-            .select('*')
+            .select(VIDEO_COLUMNS)
             .in('product_id', batch)
-            .order('view_count', { ascending: false })
-            .order('video_url', { ascending: true })
-            .range(from, to),
+            .order('id', { ascending: true })
+            .limit(size);
+          if (last) q = q.gt('id', last);
+          return q;
+        },
+        (r) => r.id,
+        (page) => pool.add(page),
         { what: `product_videos (${nicheSlug}, batch ${i / 150})` },
       );
-      allVideos = allVideos.concat(rows);
     }
   }
 
-  // Step 3: Dedup by video ID
-  const seen = new Set<string>();
-  const deduped = allVideos.filter((v: any) => {
-    const vidId = v.video_url?.match(/video\/(\d+)/)?.[1];
-    if (!vidId || seen.has(vidId)) return false;
-    seen.add(vidId);
-    return true;
-  });
+  return pool.finish();
+}
 
-  // Step 4: Filter by snowflake post date
-  const filtered = deduped
-    .filter((v: any) => {
-      const postDate = extractPostDate(v.video_url);
-      if (!postDate) return false;
-      return postDate >= cutoffDate;
-    })
-    .sort((a: any, b: any) => (b.view_count || 0) - (a.view_count || 0));
+function nicheVideoPool(nicheSlug: string): Promise<PooledVideo[]> {
+  const now = Date.now();
+  if (pooled && pooled.niche === nicheSlug && now - pooled.loadedAt < POOL_TTL) {
+    return pooled.videos;
+  }
+  const entry = { niche: nicheSlug, loadedAt: now, videos: readNicheVideos(nicheSlug) };
+  pooled = entry;
+  // A failed read must not be served to the next window as if it were the pool.
+  entry.videos.catch(() => {
+    if (pooled === entry) pooled = null;
+  });
+  return entry.videos;
+}
+
+export async function computeTopVideos(nicheSlug: string, days: number): Promise<any[]> {
+  const supabase = getAdminClient();
+  const filtered = rankVideoWindow(await nicheVideoPool(nicheSlug), days);
 
   // Step 5: Fetch product details for filtered videos
   const videoProductIds = [...new Set(filtered.map((v: any) => v.product_id))] as string[];
@@ -145,10 +225,12 @@ export async function computeTopVideos(nicheSlug: string, days: number): Promise
 
   for (let i = 0; i < videoProductIds.length; i += 200) {
     const batch = videoProductIds.slice(i, i + 200);
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('products')
       .select('product_id, title, niche_slug, niche_label, image_url, sale_price, sold_count, product_url')
       .in('product_id', batch);
+    // A failed batch used to drop its videos from the ranking without a word.
+    if (error) throw new Error(`products for videos (${nicheSlug}, batch ${i / 200}): ${error.message}`);
     if (data) data.forEach((p: any) => { productsMap[p.product_id] = p; });
   }
 

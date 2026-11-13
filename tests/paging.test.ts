@@ -70,3 +70,88 @@ test('post dates: this year and next year are fine, the future and pre-2020 are 
   assert.equal(plausiblePostDate(new Date(Date.UTC(2019, 11, 31)), now), false);
   assert.equal(plausiblePostDate(new Date(NaN), now), false);
 });
+
+// ---- keyset paging and the video pool (the rework that makes full reads affordable)
+
+import { readAllByKey } from '../api/_lib/paging';
+import { buildVideoPool, rankVideoWindow } from '../api/top-videos';
+
+/** A table keyed by a sortable string id, served in key order, 1000 at a time. */
+function keyedTable(n: number, opts: { failAfter?: number } = {}) {
+  const all = Array.from({ length: n }, (_, i) => ({ id: `k${String(i).padStart(7, '0')}` }));
+  const calls: Array<string | null> = [];
+  const fetchAfter = async (last: string | null, size: number) => {
+    calls.push(last);
+    if (opts.failAfter !== undefined && calls.length > opts.failAfter) {
+      return { data: null, error: { message: 'upstream request timeout' } };
+    }
+    const start = last === null ? 0 : all.findIndex((r) => r.id > last);
+    return { data: start < 0 ? [] : all.slice(start, start + size), error: null };
+  };
+  return { fetchAfter, calls, all };
+}
+
+test('keyset: reads every row, in order, each exactly once', async () => {
+  const t = keyedTable(3456);
+  const rows = await readAllByKey(t.fetchAfter, (r) => r.id);
+  assert.deepEqual(rows, t.all);
+  assert.equal(t.calls.length, 4);
+  assert.equal(t.calls[0], null);
+});
+
+test('keyset: a failed page throws, with how far it got', async () => {
+  const t = keyedTable(5000, { failAfter: 2 });
+  await assert.rejects(readAllByKey(t.fetchAfter, (r) => r.id, { what: 'product_videos' }), /product_videos failed after 2000 rows/);
+});
+
+test('keyset: a key that does not advance is an error, not an endless loop', async () => {
+  const stuck = async () => ({ data: Array.from({ length: 1000 }, () => ({ id: 'same' })), error: null });
+  await assert.rejects(readAllByKey(stuck, (r: any) => r.id), /did not advance/);
+});
+
+const NOW_MS = Date.UTC(2026, 10, 13);
+const DAY = 86_400_000;
+const urlAt = (ms: number, n = 1) => `https://www.tiktok.com/@c/video/${(BigInt(Math.floor(ms / 1000)) << 32n) | BigInt(n)}`;
+const vid = (daysAgo: number, views: number, extra: object = {}) => ({
+  id: `uuid-${daysAgo}-${views}`, product_id: 'p1', video_url: urlAt(NOW_MS - daysAgo * DAY, views), view_count: views, ...extra,
+});
+
+test('pool: undatable, implausible and older-than-a-year rows are dropped', () => {
+  const pool = buildVideoPool(
+    [vid(3, 100), vid(400, 999), { id: 'x', product_id: 'p', video_url: 'https://www.tiktok.com/@c/photo/1', view_count: 5 }, { id: 'y', product_id: 'p', video_url: null, view_count: 5 }],
+    NOW_MS,
+  );
+  assert.equal(pool.length, 1);
+  assert.equal(pool[0].view_count, 100);
+  assert.equal('id' in pool[0], false); // the paging key is not part of the payload
+});
+
+test('pool: the same video on two product rows is kept once, most-viewed row wins, in any order', () => {
+  const url = urlAt(NOW_MS - 2 * DAY, 7);
+  const a = { id: 'a', product_id: 'p1', video_url: url, view_count: 10 };
+  const b = { id: 'b', product_id: 'p2', video_url: url, view_count: 90 };
+  for (const rows of [[a, b], [b, a]]) {
+    const pool = buildVideoPool(rows, NOW_MS);
+    assert.equal(pool.length, 1);
+    assert.equal(pool[0].product_id, 'p2');
+  }
+});
+
+test('window: THE BUG — a recent video is ranked however many old ones outview it', () => {
+  // 1500 year-old videos with huge views, then one from three days ago. The
+  // old read took the 1000 most-viewed and never saw the recent one.
+  const old = Array.from({ length: 1500 }, (_, i) => vid(200 + (i % 100), 1_000_000 + i));
+  const pool = buildVideoPool([...old, vid(3, 80_000)], NOW_MS);
+  const week = rankVideoWindow(pool, 7, NOW_MS);
+  assert.equal(week.length, 1);
+  assert.equal(week[0].view_count, 80_000);
+});
+
+test('window: one pool serves every window, widest includes narrowest, most-viewed first', () => {
+  const pool = buildVideoPool([vid(1, 50), vid(5, 500), vid(20, 5), vid(100, 9000), vid(300, 70)], NOW_MS);
+  const sizes = [7, 14, 30, 90, 180, 365].map((d) => rankVideoWindow(pool, d, NOW_MS).length);
+  assert.deepEqual(sizes, [2, 2, 3, 3, 4, 5]);
+  const year = rankVideoWindow(pool, 365, NOW_MS).map((v) => v.view_count);
+  assert.deepEqual(year, [9000, 500, 70, 50, 5]);
+  assert.equal(pool.length, 5); // ranking a window does not consume the pool
+});
