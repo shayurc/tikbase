@@ -1,6 +1,6 @@
 import { useState, useEffect, Fragment } from 'react';
 import { Link } from 'wouter';
-import { NICHES, formatViews, authHeader } from '@/lib/supabase';
+import { NICHES, formatViews, authHeader, cacheScope } from '@/lib/supabase';
 import { InfoTip } from '@/components/InfoTip';
 import { creatorProfilePath } from '@/components/CreatorSearch';
 import { useSubscription } from '@/hooks/use-subscription';
@@ -56,7 +56,8 @@ type FetchResult = {
 async function fetchCreators(
   niche: string, days: number, page: number, limit: number,
 ): Promise<FetchResult> {
-  const cacheKey = `${niche}:${days}:${page}:${limit}`;
+  // Scoped to the account: see cacheScope in lib/supabase.ts.
+  const cacheKey = `${await cacheScope()}:${niche}:${days}:${page}:${limit}`;
   const cached = creatorCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CREATOR_CACHE_TTL) return cached.data;
 

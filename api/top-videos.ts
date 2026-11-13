@@ -7,6 +7,7 @@
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient } from '@supabase/supabase-js';
+import { readAllPages, plausiblePostDate } from './_lib/paging.js';
 
 interface CachedResult {
   videos: any[];
@@ -24,7 +25,7 @@ function extractPostDate(videoUrl: string): Date | null {
     const videoId = BigInt(match[1]);
     const timestamp = Number(videoId >> 32n);
     const date = new Date(timestamp * 1000);
-    if (date.getFullYear() < 2020 || date.getFullYear() > 2027) return null;
+    if (!plausiblePostDate(date)) return null;
     return date;
   } catch {
     return null;
@@ -83,30 +84,39 @@ export async function computeTopVideos(nicheSlug: string, days: number): Promise
 
   // Step 2: Fetch all videos (for "all") or niche videos
   let allVideos: any[] = [];
+  // Every read below goes through readAllPages. The niche branch used to ask
+  // for `.limit(5000)` per 150-product batch and silently receive 1000 — the
+  // most-viewed of all time — before the window filter ran, so recent videos
+  // were crowded out by old ones. Both branches also sorted on view_count
+  // alone, which is not a total order: rows that tie can repeat or go missing
+  // between pages. video_url breaks the tie.
   if (nicheSlug === 'all') {
-    let offset = 0;
-    while (true) {
-      const { data } = await supabase
-        .from('product_videos')
-        .select('*')
-        .order('view_count', { ascending: false })
-        .range(offset, offset + 999);
-      if (!data || data.length === 0) break;
-      allVideos = allVideos.concat(data);
-      if (data.length < 1000) break;
-      offset += 1000;
-    }
+    allVideos = await readAllPages<any>(
+      (from, to) =>
+        supabase
+          .from('product_videos')
+          .select('*')
+          .order('view_count', { ascending: false })
+          .order('video_url', { ascending: true })
+          .range(from, to),
+      { what: 'product_videos (all niches)' },
+    );
   } else {
     // Batch by product_ids
     for (let i = 0; i < productIds.length; i += 150) {
       const batch = productIds.slice(i, i + 150);
-      const { data } = await supabase
-        .from('product_videos')
-        .select('*')
-        .in('product_id', batch)
-        .order('view_count', { ascending: false })
-        .limit(5000);
-      if (data) allVideos = allVideos.concat(data);
+      const rows = await readAllPages<any>(
+        (from, to) =>
+          supabase
+            .from('product_videos')
+            .select('*')
+            .in('product_id', batch)
+            .order('view_count', { ascending: false })
+            .order('video_url', { ascending: true })
+            .range(from, to),
+        { what: `product_videos (${nicheSlug}, batch ${i / 150})` },
+      );
+      allVideos = allVideos.concat(rows);
     }
   }
 
