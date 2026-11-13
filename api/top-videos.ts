@@ -313,11 +313,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
       videos = cached.videos;
     } else {
-      // Prefer the daily precomputed ranking (instant); fall back to live
-      // computation only for combos not yet precomputed.
+      // Precomputed only — see the same block in api/top-products.ts. The live
+      // fallback read a whole niche of videos inside a request (97s for
+      // beauty-skincare, measured 2026-11-13) and cached whatever a failing
+      // read produced, including nothing, for an hour.
       const pre = await readPrecomputed(nicheSlug, days);
-      videos = pre ?? (await computeTopVideos(nicheSlug, days));
-      cache.set(cacheKey, { videos, timestamp: Date.now() });
+      if (!pre) {
+        res.setHeader('Retry-After', '60');
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(503).json({
+          error: 'ranking_unavailable',
+          message: 'This ranking is not available right now. This is not an answer about the data.',
+        });
+      }
+      videos = pre;
+      if (videos.length > 0) cache.set(cacheKey, { videos, timestamp: Date.now() });
     }
 
     const offset = (page - 1) * limit;
