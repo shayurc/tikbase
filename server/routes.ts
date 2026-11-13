@@ -7,6 +7,7 @@ import topVideosHandler from "../api/top-videos";
 import topCreatorsHandler from "../api/top-creators";
 import avatarHandler from "../api/avatar";
 import thumbHandler from "../api/thumb";
+import deleteAccountHandler from "../api/delete-account";
 import creatorSearchHandler from "../api/creator-search";
 import creatorProfileHandler from "../api/creator-profile";
 import productSearchHandler from "../api/product-search";
@@ -15,7 +16,6 @@ import brandProfileHandler from "../api/brand-profile";
 import { isUpstreamOutage, unavailable } from "../api/_lib/upstream.js";
 import productDetailHandler from "../api/product-detail";
 import videoTranscriptHandler from "../api/video-transcript";
-import deleteAccountHandler from "../api/delete-account";
 
 // ---- Supabase admin client (service role, server-only) ----
 let cachedAdmin: SupabaseClient | null = null;
