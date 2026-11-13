@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext, type ReactNode } from 'react';
 import { useAuth } from '@/lib/auth';
-import { askSubscription } from '@/lib/subscription-check';
+import { askSubscription, type PlanSource } from '@/lib/subscription-check';
 
 /**
  * 'loading'  first check for this account is still in flight
@@ -14,6 +14,8 @@ export type SubscriptionStatus = 'loading' | 'known' | 'unknown';
 
 interface SubscriptionState {
   isPaid: boolean;
+  /** Who bills the plan, so pages do not send an Apple subscriber to Stripe. */
+  planSource: PlanSource;
   subscriptionStatus: SubscriptionStatus;
   showPaywall: (feature?: string) => void;
   paywallVisible: boolean;
@@ -25,6 +27,7 @@ interface SubscriptionState {
 
 const SubscriptionContext = createContext<SubscriptionState>({
   isPaid: false,
+  planSource: null,
   subscriptionStatus: 'loading',
   showPaywall: () => {},
   paywallVisible: false,
@@ -40,6 +43,7 @@ const RECHECK_WINDOW_MS = 5 * 60 * 1000;
 export function SubscriptionProvider({ children }: { children: ReactNode }) {
   const { user, session, loading: authLoading } = useAuth();
   const [isPaid, setIsPaid] = useState(false);
+  const [planSource, setPlanSource] = useState<PlanSource>(null);
   const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus>('loading');
   const [paywallVisible, setPaywallVisible] = useState(false);
   const stripeOpenedAt = useRef<number | null>(null);
@@ -62,6 +66,7 @@ export function SubscriptionProvider({ children }: { children: ReactNode }) {
     if (seq !== checkSeq.current) return;
     if (answer.known) {
       setIsPaid(answer.isPaid);
+      setPlanSource(answer.source);
       setSubscriptionStatus('known');
     } else {
       // Could not ask. isPaid is deliberately left alone: a failed request is
@@ -87,12 +92,14 @@ export function SubscriptionProvider({ children }: { children: ReactNode }) {
       checkSeq.current++;
       checkedUserId.current = null;
       setIsPaid(false);
+      setPlanSource(null);
       setSubscriptionStatus('known');
       return;
     }
     if (checkedUserId.current !== userId) {
       checkedUserId.current = userId;
       setIsPaid(false);
+      setPlanSource(null);
       setSubscriptionStatus('loading');
     }
     checkSubscription(token);
@@ -136,7 +143,7 @@ export function SubscriptionProvider({ children }: { children: ReactNode }) {
 
   return (
     <SubscriptionContext.Provider value={{
-      isPaid, subscriptionStatus, showPaywall, paywallVisible, paywallFeature, closePaywall, markStripeOpened, refreshSubscription,
+      isPaid, planSource, subscriptionStatus, showPaywall, paywallVisible, paywallFeature, closePaywall, markStripeOpened, refreshSubscription,
     }}>
       {children}
     </SubscriptionContext.Provider>

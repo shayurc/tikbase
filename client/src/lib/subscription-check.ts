@@ -17,8 +17,16 @@
  */
 
 export type SubscriptionAnswer =
-  | { known: true; isPaid: boolean }
+  | { known: true; isPaid: boolean; source: PlanSource }
   | { known: false };
+
+/**
+ * Where a paid plan is billed. Stripe plans are managed in our billing portal;
+ * a plan bought in the iPhone app is billed by Apple and can only be managed in
+ * the customer's Apple Account settings. null when not paid, or when an older
+ * server did not say.
+ */
+export type PlanSource = 'stripe' | 'apple' | null;
 
 export interface AskOptions {
   fetchImpl?: typeof fetch;
@@ -45,7 +53,10 @@ export async function askSubscription(
       });
       if (res.ok) {
         const data = await res.json();
-        return { known: true, isPaid: data?.isPaid === true };
+        const isPaid = data?.isPaid === true;
+        const source: PlanSource =
+          isPaid && (data?.source === 'apple' || data?.source === 'stripe') ? data.source : null;
+        return { known: true, isPaid, source };
       }
     } catch {
       // Network failure or an unparseable body: we could not ask.

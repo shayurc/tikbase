@@ -42,7 +42,7 @@ test('askSubscription: a 200 is an answer, either way, in one request', async ()
   for (const isPaid of [true, false]) {
     const f = scriptedFetch([{ status: 200, body: { isPaid } }]);
     const answer = await askSubscription('tok', { fetchImpl: f.impl, sleep: noWait().sleep });
-    assert.deepEqual(answer, { known: true, isPaid });
+    assert.deepEqual(answer, { known: true, isPaid, source: null });
     assert.equal(f.calls.length, 1);
     assert.equal(f.calls[0].url, '/api/check-subscription');
     assert.equal(f.calls[0].auth, 'Bearer tok'); // the old success-page poll sent none
@@ -56,7 +56,7 @@ test('askSubscription: a 503 then a 200 is retried into an answer', async () => 
   ]);
   const w = noWait();
   const answer = await askSubscription('tok', { fetchImpl: f.impl, sleep: w.sleep });
-  assert.deepEqual(answer, { known: true, isPaid: true });
+  assert.deepEqual(answer, { known: true, isPaid: true, source: null });
   assert.equal(f.calls.length, 2);
   assert.deepEqual(w.waits, [1000]);
 });
@@ -81,7 +81,7 @@ test('askSubscription: a dead connection is UNKNOWN, not "free"', async () => {
 test('askSubscription: a 200 that is not JSON is not an answer', async () => {
   const f = scriptedFetch([{ status: 200, raw: '<html>gateway</html>' }, { status: 200, body: { isPaid: true } }]);
   const answer = await askSubscription('tok', { fetchImpl: f.impl, sleep: noWait().sleep });
-  assert.deepEqual(answer, { known: true, isPaid: true });
+  assert.deepEqual(answer, { known: true, isPaid: true, source: null });
   assert.equal(f.calls.length, 2);
 });
 
@@ -223,4 +223,31 @@ test('the cached ranking is never re-ordered in place', () => {
   rankForCaller(all, 'paid', 'sale_price', 'asc');
   rankForCaller(all, 'free', 'revenue30d', 'desc');
   assert.deepEqual(ids(all), before);
+});
+
+// ------------------------------------------------- plan source and deleted accounts
+
+import { isUserGone } from '../api/stripe-webhook';
+
+test('askSubscription: says who bills the plan, and only when there is one', async () => {
+  const ask = async (body: unknown) => {
+    const f = scriptedFetch([{ status: 200, body }]);
+    return askSubscription('tok', { fetchImpl: f.impl, sleep: noWait().sleep });
+  };
+  assert.deepEqual(await ask({ isPaid: true, source: 'apple' }), { known: true, isPaid: true, source: 'apple' });
+  assert.deepEqual(await ask({ isPaid: true, source: 'stripe' }), { known: true, isPaid: true, source: 'stripe' });
+  // An older server, or a value we do not know: no claim about who bills it.
+  assert.deepEqual(await ask({ isPaid: true }), { known: true, isPaid: true, source: null });
+  assert.deepEqual(await ask({ isPaid: true, source: 'paypal' }), { known: true, isPaid: true, source: null });
+  // Not paid never carries a source, whatever the body says.
+  assert.deepEqual(await ask({ isPaid: false, source: 'apple' }), { known: true, isPaid: false, source: null });
+});
+
+test('webhook: "no such user" is told apart from "could not ask"', () => {
+  assert.equal(isUserGone({ status: 404, message: 'User not found' }, null), true);
+  assert.equal(isUserGone(null, null), true);
+  // An outage must still be retried, not swallowed as a deleted account.
+  assert.equal(isUserGone({ status: 503, message: 'upstream' }, null), false);
+  assert.equal(isUserGone({ message: 'fetch failed' }, null), false);
+  assert.equal(isUserGone(null, { id: 'u1' }), false);
 });

@@ -115,9 +115,28 @@ async function resolveUserIdForSub(stripe: Stripe, sub: Stripe.Subscription): Pr
   }
 }
 
+/** The account a subscription points at no longer exists. Not a failure. */
+export class AccountGoneError extends Error {
+  constructor(userId: string) {
+    super(`User ${userId} no longer exists`);
+    this.name = 'AccountGoneError';
+  }
+}
+
+/** A lookup error that says "no such user", as opposed to "could not ask". */
+export function isUserGone(error: unknown, user: unknown): boolean {
+  if (error) return Number((error as any).status) === 404;
+  return !user;
+}
+
 async function writeSnapshot(userId: string, sub: Stripe.Subscription) {
   const supabase = getSupabase();
   const { data, error } = await supabase.auth.admin.getUserById(userId);
+  // Accounts can now be deleted (api/delete-account.ts), including ones whose
+  // plan is cancelled and still running out its paid period. Stripe's last
+  // events for that plan then name a user who is gone. Treating that as an
+  // error answered 500, and Stripe retried the same event for three days.
+  if (isUserGone(error, data?.user)) throw new AccountGoneError(userId);
   if (error || !data.user) throw new Error(`User ${userId} not found`);
   const prev = (data.user.app_metadata as Record<string, any>) || {};
   const { error: updErr } = await supabase.auth.admin.updateUserById(userId, {
@@ -246,6 +265,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.json({ received: true });
   } catch (err: any) {
+    if (err instanceof AccountGoneError) {
+      // Nothing to update and nothing a retry would change.
+      console.warn(`${event.type}: ${err.message} — acknowledged, nothing to update`);
+      return res.json({ received: true, ignored: 'account_deleted' });
+    }
     console.error(`Error handling ${event.type}:`, err?.message);
     return res.status(500).json({ error: err?.message });
   }

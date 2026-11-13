@@ -5,7 +5,11 @@ import { useSubscription } from '@/hooks/use-subscription';
 
 export default function BillingPage() {
   const { user, session } = useAuth();
-  const { isPaid, subscriptionStatus, refreshSubscription } = useSubscription();
+  const { isPaid, planSource, subscriptionStatus, refreshSubscription } = useSubscription();
+  // Pro bought in the iPhone app is billed by Apple. There is no Stripe
+  // customer behind it, so the portal button below would fail with "No
+  // subscription found" — and we could not change the plan for them anyway.
+  const appleBilled = isPaid && planSource === 'apple';
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [retrying, setRetrying] = useState(false);
@@ -111,8 +115,22 @@ export default function BillingPage() {
         )}
       </div>
 
+      {/* Billed by Apple: say where it is managed instead of offering a portal */}
+      {appleBilled && (
+        <div className="rounded-lg border border-border bg-card p-5 mb-4" data-testid="apple-billed">
+          <div className="flex items-center gap-2 mb-3">
+            <Settings size={16} className="text-muted-foreground" />
+            <h2 className="text-sm font-semibold text-foreground">Manage Subscription</h2>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            You subscribed in the TikBase iPhone app, so Apple handles the billing. To change or cancel
+            it, open Settings on your iPhone, tap your name, then Subscriptions.
+          </p>
+        </div>
+      )}
+
       {/* Manage Subscription */}
-      {isPaid && (
+      {isPaid && !appleBilled && (
         <div className="rounded-lg border border-border bg-card p-5 mb-4">
           <div className="flex items-center gap-2 mb-3">
             <Settings size={16} className="text-muted-foreground" />
@@ -145,7 +163,9 @@ export default function BillingPage() {
         <div className="text-center py-8">
           <CreditCard size={28} className="mx-auto text-muted-foreground/30 mb-2" />
           <p className="text-sm text-muted-foreground">
-            {isPaid
+            {appleBilled
+              ? 'Your payment method is the one on your Apple Account.'
+              : isPaid
               ? 'Manage payment methods via the subscription portal above.'
               : planUnknown
                 ? '—'
@@ -168,7 +188,9 @@ export default function BillingPage() {
         <div className="text-center py-8">
           <Receipt size={28} className="mx-auto text-muted-foreground/30 mb-2" />
           <p className="text-sm text-muted-foreground">
-            {isPaid
+            {appleBilled
+              ? 'Receipts are in your Apple Account purchase history.'
+              : isPaid
               ? 'View invoices in the subscription portal.'
               : planUnknown
                 ? '—'

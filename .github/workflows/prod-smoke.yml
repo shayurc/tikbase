@@ -122,7 +122,7 @@ jobs:
           fail=0
           # `creators` is deliberately absent: it is readable today and is
           # tracked separately. Add it here once it is locked.
-          for t in rankings_cache creator_rankings billing_orphans products product_snapshots product_videos video_transcripts transcript_spend search_misses product_revenue_30d; do
+          for t in rankings_cache creator_rankings billing_orphans products product_snapshots product_videos video_transcripts transcript_spend search_misses product_revenue_30d apple_subscription_links; do
             code=$(curl -s -o /tmp/rows -w "%{http_code}" -m 30 -H "apikey: $KEY" -H "Authorization: Bearer $KEY" "$SB/rest/v1/$t?select=*&limit=1" || echo 000)
             rows=$(head -c 120 /tmp/rows)
             if [ "$code" = "200" ] && [ "$rows" != "[]" ]; then
