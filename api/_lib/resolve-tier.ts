@@ -33,7 +33,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 export type Tier = 'free' | 'paid';
 
-const ACTIVE_STATUSES = new Set(['active', 'trialing', 'past_due']);
+/** Stripe subscription statuses that count as paying. Exported so the checkout
+ *  guard and the tier gate cannot disagree about who already has a plan. */
+export const ACTIVE_STATUSES = new Set(['active', 'trialing', 'past_due']);
 
 /**
  * Short-lived token -> tier memo.

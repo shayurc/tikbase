@@ -1,157 +1,169 @@
 import { useState } from 'react';
-import { NICHES, TIMEFRAMES } from '@/lib/supabase';
-import { User, Bell, Trash2 } from 'lucide-react';
+import { User, KeyRound, Trash2, Loader2 } from 'lucide-react';
+import { useAuth } from '@/lib/auth';
+
+// What this page used to be: a Name and Email form with a Save button that had
+// no handler, default-category and default-timeframe selects that were stored
+// nowhere, three notification switches for emails that are never sent, and a
+// Delete Account button wired to nothing. None of it did anything, and all of
+// it looked like it did.
+//
+// Everything on the page now does what it says. The preference and
+// notification sections are gone rather than faked; they can come back when
+// there is something behind them.
+const CONFIRM_WORD = 'DELETE'; // must match api/delete-account.ts
 
 export default function SettingsPage() {
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [defaultCategory, setDefaultCategory] = useState(NICHES[0].slug);
-  const [defaultTimeframe, setDefaultTimeframe] = useState(TIMEFRAMES[0].label);
-  const [notifyNewProducts, setNotifyNewProducts] = useState(true);
-  const [notifyTrending, setNotifyTrending] = useState(false);
-  const [notifyWeekly, setNotifyWeekly] = useState(true);
+  const { user, session, requestPasswordReset, signOut } = useAuth();
+
+  const [resetState, setResetState] = useState<'idle' | 'sending' | 'sent'>('idle');
+  const [resetError, setResetError] = useState('');
+
+  const [confirm, setConfirm] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
+  const email = user?.email ?? '';
+  // Google sign-ins have no password here to reset.
+  const provider = (user?.app_metadata as { provider?: string } | undefined)?.provider;
+  const hasPassword = !provider || provider === 'email';
+
+  async function handleSendReset() {
+    if (!email) return;
+    setResetError('');
+    setResetState('sending');
+    const { error } = await requestPasswordReset(email);
+    if (error) {
+      setResetError(error.message);
+      setResetState('idle');
+    } else {
+      setResetState('sent');
+    }
+  }
+
+  async function handleDelete() {
+    if (!session?.access_token || confirm !== CONFIRM_WORD) return;
+    setDeleteError('');
+    setDeleting(true);
+    try {
+      const res = await fetch('/api/delete-account', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ confirm }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.deleted) {
+        setDeleteError(data.message || 'Your account could not be deleted. Nothing was changed.');
+        setDeleting(false);
+        return;
+      }
+      await signOut();
+      window.location.hash = '#/';
+    } catch {
+      setDeleteError('We could not reach the server. Nothing was changed.');
+      setDeleting(false);
+    }
+  }
 
   return (
     <div className="p-5 md:p-8 max-w-3xl" data-testid="settings-page">
-      <div className="mb-6">
+      <div className="mb-8">
         <h1 className="text-xl font-semibold text-foreground mb-1">Settings</h1>
-        <p className="text-sm text-muted-foreground">
-          Manage your profile and preferences
-        </p>
+        <p className="text-sm text-muted-foreground">Your account</p>
       </div>
 
-      {/* Profile */}
-      <div className="rounded-lg border border-border bg-card p-5 mb-4">
+      {/* Account */}
+      <div className="rounded-lg border border-border bg-card px-5 py-4 mb-4">
         <div className="flex items-center gap-2 mb-4">
           <User size={16} className="text-muted-foreground" />
-          <h2 className="text-sm font-semibold text-foreground">Profile</h2>
+          <h2 className="text-sm font-semibold text-foreground">Account</h2>
         </div>
-        <div className="space-y-3">
+        <dl className="space-y-3">
           <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-              Name
-            </label>
-            <input
-              type="text"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="Your name"
-              className="w-full h-9 px-3 rounded-md text-sm border border-border bg-background text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary"
-              data-testid="input-name"
-            />
+            <dt className="text-xs font-medium text-muted-foreground mb-1">Email</dt>
+            <dd className="text-sm font-mono text-foreground break-all" data-testid="account-email">
+              {email || '—'}
+            </dd>
           </div>
           <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-              Email
-            </label>
-            <input
-              type="email"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              placeholder="your@email.com"
-              className="w-full h-9 px-3 rounded-md text-sm border border-border bg-background text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary"
-              data-testid="input-email"
-            />
+            <dt className="text-xs font-medium text-muted-foreground mb-1">Sign-in method</dt>
+            <dd className="text-sm text-foreground" data-testid="account-provider">
+              {hasPassword ? 'Email and password' : provider === 'google' ? 'Google' : provider}
+            </dd>
           </div>
-          <button
-            className="h-8 px-4 rounded-md text-xs font-bold transition-colors bg-primary text-primary-foreground"
-            data-testid="btn-save-profile"
-          >
-            Save Changes
-          </button>
-        </div>
+        </dl>
       </div>
 
-      {/* Preferences */}
-      <div className="rounded-lg border border-border bg-card p-5 mb-4">
-        <h2 className="text-sm font-semibold text-foreground mb-4">Default Preferences</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-              Default Category
-            </label>
-            <select
-              value={defaultCategory}
-              onChange={e => setDefaultCategory(e.target.value)}
-              className="w-full h-9 px-3 rounded-md text-sm border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer"
-              data-testid="select-default-category"
-            >
-              {NICHES.map(n => (
-                <option key={n.slug} value={n.slug}>
-                  {n.label}
-                </option>
-              ))}
-            </select>
+      {/* Password */}
+      {hasPassword && (
+        <div className="rounded-lg border border-border bg-card px-5 py-4 mb-4">
+          <div className="flex items-center gap-2 mb-3">
+            <KeyRound size={16} className="text-muted-foreground" />
+            <h2 className="text-sm font-semibold text-foreground">Password</h2>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-              Default Timeframe
-            </label>
-            <select
-              value={defaultTimeframe}
-              onChange={e => setDefaultTimeframe(e.target.value)}
-              className="w-full h-9 px-3 rounded-md text-sm border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer"
-              data-testid="select-default-timeframe"
-            >
-              {TIMEFRAMES.map(tf => (
-                <option key={tf.label} value={tf.label}>
-                  {tf.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {/* Notifications */}
-      <div className="rounded-lg border border-border bg-card p-5 mb-4">
-        <div className="flex items-center gap-2 mb-4">
-          <Bell size={16} className="text-muted-foreground" />
-          <h2 className="text-sm font-semibold text-foreground">Notifications</h2>
-        </div>
-        <div className="space-y-3">
-          {[
-            { label: 'New products in my categories', state: notifyNewProducts, setter: setNotifyNewProducts },
-            { label: 'Trending video alerts', state: notifyTrending, setter: setNotifyTrending },
-            { label: 'Weekly digest email', state: notifyWeekly, setter: setNotifyWeekly },
-          ].map(item => (
-            <div key={item.label} className="flex items-center justify-between">
-              <span className="text-sm text-foreground">{item.label}</span>
+          {resetState === 'sent' ? (
+            <p className="text-sm text-muted-foreground" data-testid="reset-sent">
+              A link to choose a new password is on its way to <span className="font-mono text-foreground">{email}</span>.
+            </p>
+          ) : (
+            <>
+              <p className="text-sm text-muted-foreground mb-3">
+                We will email you a link to choose a new password.
+              </p>
               <button
-                onClick={() => item.setter(!item.state)}
-                className={`relative w-9 h-5 rounded-full transition-colors ${
-                  item.state ? 'bg-primary' : 'bg-muted'
-                }`}
-                data-testid={`toggle-${item.label.toLowerCase().replace(/\s+/g, '-')}`}
+                onClick={handleSendReset}
+                disabled={resetState === 'sending' || !email}
+                className="inline-flex items-center gap-2 h-9 px-4 rounded-md text-xs font-bold transition-colors disabled:opacity-50 bg-primary text-primary-foreground"
+                data-testid="btn-send-reset"
               >
-                <div
-                  className={`absolute top-0.5 w-4 h-4 rounded-full transition-transform ${
-                    item.state
-                      ? 'translate-x-[18px] bg-primary-foreground'
-                      : 'translate-x-0.5 bg-foreground'
-                  }`}
-                />
+                {resetState === 'sending' && <Loader2 size={14} className="animate-spin" />}
+                Email me a reset link
               </button>
-            </div>
-          ))}
+              {resetError && <p className="text-sm text-destructive mt-2">{resetError}</p>}
+            </>
+          )}
         </div>
-      </div>
+      )}
 
       {/* Danger Zone */}
-      <div className="rounded-lg border border-destructive/30 bg-card p-5">
+      <div className="rounded-lg border border-destructive/30 bg-card px-5 py-4">
         <div className="flex items-center gap-2 mb-3">
           <Trash2 size={16} className="text-destructive" />
           <h2 className="text-sm font-semibold text-destructive">Delete Account</h2>
         </div>
         <p className="text-sm text-muted-foreground mb-3">
-          Permanently delete your account and all associated data. This action cannot be undone.
+          Permanently deletes your TikBase account. This cannot be undone. If you have a Pro subscription,
+          cancel it in Billing first.
         </p>
-        <button
-          className="h-8 px-4 rounded-md text-xs font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
-          data-testid="btn-delete-account"
-        >
-          Delete Account
-        </button>
+        <label htmlFor="delete-confirm" className="block text-xs font-medium text-muted-foreground mb-1.5">
+          Type <span className="font-mono text-foreground">{CONFIRM_WORD}</span> to confirm
+        </label>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            id="delete-confirm"
+            type="text"
+            value={confirm}
+            onChange={e => setConfirm(e.target.value)}
+            autoComplete="off"
+            className="h-9 px-3 rounded-md text-sm font-mono border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-destructive sm:w-48"
+            data-testid="input-delete-confirm"
+          />
+          <button
+            onClick={handleDelete}
+            disabled={confirm !== CONFIRM_WORD || deleting}
+            className="inline-flex items-center justify-center gap-2 h-9 px-4 rounded-md text-xs font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+            data-testid="btn-delete-account"
+          >
+            {deleting && <Loader2 size={14} className="animate-spin" />}
+            Delete Account
+          </button>
+        </div>
+        {deleteError && (
+          <p className="text-sm text-destructive mt-2" data-testid="delete-error">{deleteError}</p>
+        )}
       </div>
     </div>
   );

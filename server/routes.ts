@@ -15,6 +15,7 @@ import brandProfileHandler from "../api/brand-profile";
 import { isUpstreamOutage, unavailable } from "../api/_lib/upstream.js";
 import productDetailHandler from "../api/product-detail";
 import videoTranscriptHandler from "../api/video-transcript";
+import deleteAccountHandler from "../api/delete-account";
 
 // ---- Supabase admin client (service role, server-only) ----
 let cachedAdmin: SupabaseClient | null = null;
@@ -414,6 +415,16 @@ export async function registerRoutes(
     } catch (err: any) {
       console.error("video-transcript (proxy) error:", err?.message);
       if (!res.headersSent) res.status(500).json({ error: "Failed to load transcript" });
+    }
+  });
+
+  // ---- Delete account ----
+  app.post("/api/delete-account", async (req, res) => {
+    try {
+      await deleteAccountHandler(req as any, res as any);
+    } catch (err: any) {
+      console.error("delete-account (proxy) error:", err?.message);
+      if (!res.headersSent) res.status(500).json({ error: "delete_failed" });
     }
   });
 
