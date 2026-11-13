@@ -8,9 +8,10 @@ and the videos doing the work. Free tier sees a slice; Pro sees the numbers.
 | path | what lives there |
 |---|---|
 | `api/*.ts` | Vercel serverless functions — one file, one endpoint, default-exported handler |
-| `server/routes.ts` | Express dev-server mirror. **Every new `api/` handler needs a route here or it 404s in dev** |
+| `api/_lib/` | helpers the handlers share (`resolve-tier.ts`, `paging.ts`, `upstream.ts`, `image-guard.ts`, `avatar-cache.ts`). Under `api/` because Vercel does not ship imports from outside it; import with an explicit `.js` |
+| `server/routes.ts` | Express dev server. It runs the real `api/` handlers, it does not copy them (only the Stripe webhook has its own copy, for the raw body). **Every new `api/` handler needs a route here or it 404s in dev** |
 | `client/src/pages/` | one file per route; `client/src/components/` for shared UI |
-| `shared/` | code both sides import (`resolve-tier.ts`, `creator-key.js`, `avatar-cache.ts`) |
+| `shared/` | code the pipeline and client both import (`creator-key.js`). Nothing an `api/` handler needs — see `api/_lib/` |
 | `pipeline/` | nightly cron work — discovery, snapshots, precompute. Runs under bare `node` |
 | `migrations/manual/` | dated `.sql`, applied by hand. The only schema history there is |
 | `probes/` | written-up investigations. Read before re-deriving something |
@@ -48,16 +49,23 @@ the named-param form matches a single trailing segment.
   thing sold nothing; a dash says we have no figure. Different claims.
 - Paid-only fields are **omitted from the response** for free callers, not
   zeroed or truncated. Tier comes from the bearer token via
-  `shared/resolve-tier.ts` — never from a query param.
+  `api/_lib/resolve-tier.ts` — never from a query param. There is one copy; do not add another.
 - Enforce limits server-side. `?limit=100&page=3` must not widen a free slice.
+  Neither may `?sort=`: cut the free slice first, then sort it (`rankForCaller`).
+- A failed request is not an empty result. "Could not ask" is a 503 from the
+  server and a "couldn't load" state in the client, never `isPaid:false`, `[]`
+  or "No products".
 - Say what a number covers when the coverage is partial ("20 of 77 products
   modelled"), rather than presenting a subtotal as a total.
 
 ## Data and infrastructure
 
 - Supabase (PostgREST + pooler). **PostgREST caps every response at 1000 rows**
-  regardless of `.limit()` — page, or do the work in SQL. This has caused two
-  separate silent data bugs; assume it will cause a third.
+  regardless of `.limit()` — page, or do the work in SQL. This has caused three
+  separate silent data bugs. Use `readAllByKey` / `forEachKeyPage` in
+  `api/_lib/paging.ts`: keyset on a unique column, and a failed page throws.
+- The ranking endpoints serve the nightly precompute and nothing else. Do not
+  add a compute-in-the-request fallback: `products:all:*` is about ten minutes.
 - `= any($1)` inside a SQL function is a parameter, so the planner cannot
   estimate cardinality and falls back to a generic plan. Join against
   `unnest()` instead. (100x on the product RPCs.)
@@ -85,7 +93,9 @@ all combos takes hours — start it early, and do not sit blocked on it.
 
 ## Verify before you ask for a merge
 
-- `npm run check` (tsc) and `npm test` (node:test, `pipeline/*.test.js`).
+- `npm run check` (tsc — covers `client/`, `server/`, `api/` and `pipeline/*.ts`)
+  and `npm test` (node:test, `pipeline/*.test.js` and `tests/*.test.ts`). CI runs
+  both and the build on every pull request; the Vercel check does not type-check.
 - `npm run build`, and boot `npm run dev` and load a page. Port 5000 is taken by
   macOS AirPlay — use `PORT=5099`.
 - Curl the endpoint as **both** a free and a paid token. A tier claim without
