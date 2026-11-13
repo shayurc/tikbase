@@ -219,7 +219,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       case 'customer.subscription.updated':
       case 'customer.subscription.deleted': {
-        const sub = event.data.object as Stripe.Subscription;
+        // The event carries the subscription as it was WHEN THE EVENT WAS MADE,
+        // and Stripe does not deliver in order. A delayed `updated` (active)
+        // arriving after `deleted` (canceled) would write 'active' back and
+        // leave a cancelled customer on Pro until something else touched the
+        // record. Ask Stripe what is true now, as checkout.session.completed
+        // and the dev server already do; a deleted subscription still
+        // retrieves, with status 'canceled'. Fall back to the payload only if
+        // the read fails, so an event is never dropped.
+        const fromEvent = event.data.object as Stripe.Subscription;
+        const sub = await stripe.subscriptions
+          .retrieve(fromEvent.id)
+          .catch(() => fromEvent);
         const userId = await resolveUserIdForSub(stripe, sub);
         if (!userId) {
           console.warn(`${event.type} for ${sub.id}: no supabase_user_id and customer email matched no account — ignoring`);
