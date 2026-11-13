@@ -19,6 +19,11 @@ import { recordDead404s, clearStrikes, STRIKES_TO_FLAG } from "./price-strikes.j
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import {
+  readProductResponse,
+  shouldAbortSnapshots,
+  snapshotFailure,
+} from "./product-response.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -150,6 +155,7 @@ const stats = {
   phase2_products: 0,
   phase2_birth_snapshots: 0,
   phase3_snapshots: 0,
+  phase3_failure: null,
   phase3_rotation_advanced: 0,
   // null, not 0: "not measured" and "measured at zero" are different facts,
   // and printing the second when the first is true is what hid a broken
@@ -1407,8 +1413,14 @@ async function phase3(limitOverride) {
   const deadIds = [];
   const relatedByProduct = new Map(); // productId -> related_videos[] (bonus payload)
   let fetched = 0, p404 = 0, errors = 0, credit402 = 0;
+  // answered = HTTP 200 with a JSON body; unusable = answered but carrying no
+  // sold count, price or stock. A run of nothing-but-unusable answers means
+  // the response shape changed, and `aborted` stops paying for more of them.
+  let answered = 0, unusable = 0, skippedAfterAbort = 0;
+  let aborted = false;
 
   await snapshotPool(trackedSet, SNAPSHOT_CONCURRENCY, async (productId) => {
+    if (aborted) { skippedAfterAbort++; return; }
     const r = await fetchProductDetailRaw(productId);
     if (r.status === 404) { p404++; deadIds.push(productId); return; }
     if (r.status === 402) { credit402++; stats.api_failures++; stats.api_402++; return; }
@@ -1417,20 +1429,40 @@ async function phase3(limitOverride) {
     // Stash related_videos from the SAME response (zero extra API cost). Fully
     // guarded so nothing here can disrupt snapshot capture below. Written to the
     // DB only after snapshots are persisted (see below).
+    // The response is read in ONE place (product-response.js). This block used
+    // to read product_base and skus off the top level; the vendor moved both
+    // under product_info while the job was down, and every product would have
+    // come back as "nothing usable" — about 6,000 credits a night for no
+    // sales reading at all.
+    const read = readProductResponse(r.json);
+    answered++;
     try {
-      const rv = r.json.related_videos;
+      const rv = read.relatedVideos;
       if (Array.isArray(rv) && rv.length) relatedByProduct.set(String(productId), rv);
     } catch { /* related_videos is a bonus; never let it affect snapshots */ }
 
-    const pb = r.json.product_base;
-    const soldCount = pb?.sold_count != null ? pb.sold_count : null;
-    const salePrice = parseNum(pb?.price?.min_sku_price);
+    const soldCount = read.soldCount;
+    const salePrice = read.minSkuPrice;
     // Total inventory across all SKUs (skus[].stock); null if no SKUs present.
-    const stock = Array.isArray(r.json.skus)
-      ? r.json.skus.reduce((sum, s) => sum + (Number(s?.stock) || 0), 0)
-      : null;
+    const stock = read.stock;
 
-    if (soldCount == null && salePrice == null && stock == null) { errors++; return; }
+    if (soldCount == null && salePrice == null && stock == null) {
+      errors++;
+      unusable++;
+      if (!aborted && shouldAbortSnapshots({ answered, usable: fetched })) {
+        aborted = true;
+        console.error(
+          `\n  ${"!".repeat(60)}\n` +
+          `  STOPPING SNAPSHOTS: the first ${answered} product answers carried no sold\n` +
+          `  count, price or stock (response layout "${read.layout}").\n` +
+          `  The vendor's response shape has probably changed. Not spending the\n` +
+          `  remaining credits on calls that cannot be read.\n` +
+          `  Fix pipeline/product-response.js, then re-run.\n` +
+          `  ${"!".repeat(60)}\n`
+        );
+      }
+      return;
+    }
     snapshots.push({
       product_id: String(productId),
       sold_count: soldCount,
@@ -1442,6 +1474,33 @@ async function phase3(limitOverride) {
   });
 
   console.log(`  Fetched fresh: ${fetched} | 404 (marked): ${p404} | transient errors: ${errors} | 402 credit failures: ${credit402}`);
+  if (unusable || skippedAfterAbort) {
+    console.log(`  Answered but unreadable: ${unusable} | not attempted after early stop: ${skippedAfterAbort}`);
+  }
+
+  // A night that reads no sales is a failed night, and must look like one.
+  // A credit wall has its own, more specific message in main().
+  const phase3Failure = credit402 > 0
+    ? null
+    : snapshotFailure({
+        selectionError: hot.error ? hot.error.message : null,
+        tracked: trackedSet.length,
+        usable: fetched,
+        notFound: p404,
+        aborted,
+      });
+  if (phase3Failure) {
+    stats.phase3_failure = phase3Failure;
+    console.error(
+      `\n  ${"!".repeat(60)}\n` +
+      `  NO SALES READINGS: ${phase3Failure}.\n` +
+      `  Every revenue and units figure on the site is built from these readings.\n` +
+      `  Exiting NON-ZERO so this run shows red and the rankings are not rebuilt\n` +
+      `  on top of old sales data as if it were new.\n` +
+      `  ${"!".repeat(60)}\n`
+    );
+    process.exitCode = 1;
+  }
 
   // Write snapshots (preserve composite-key upsert + insert fallback).
   // Track which ones actually landed — only those may advance the rotation
@@ -1600,12 +1659,10 @@ async function phase4() {
       );
       await sleep(RATE_LIMIT_MS);
 
-      const price =
-        data?.product_base?.price?.min_sku_price ??
-        data?.data?.product_base?.price?.min_sku_price ??
-        null;
-
-      const pb = data?.product_base;
+      // Read through product-response.js: these fields moved under
+      // product_info in 2026, and a top-level read finds none of them.
+      const read = readProductResponse(data);
+      const price = read.minSkuPrice;
       const updateFields = { updated_at: new Date().toISOString() };
       let hasUpdate = false;
 
@@ -1635,20 +1692,17 @@ async function phase4() {
         updateFields.sale_price = parseFloat(price);
         hasUpdate = true;
       }
-      if (pb?.price?.original_price) {
-        const op = parseFloat(String(pb.price.original_price).replace(/[^0-9.]/g, ''));
-        if (op > 0) { updateFields.original_price = op; hasUpdate = true; }
-      }
+      if (read.originalPrice != null) { updateFields.original_price = read.originalPrice; hasUpdate = true; }
       // Fill sold_count if available
-      if (pb?.sold_count != null && pb.sold_count > 0) {
-        updateFields.sold_count = pb.sold_count;
+      if (read.soldCount != null && read.soldCount > 0) {
+        updateFields.sold_count = read.soldCount;
         hasUpdate = true;
       }
       // Fill other fields
-      if (pb?.title) { updateFields.title = pb.title; hasUpdate = true; }
-      if (pb?.images?.[0]?.url_list?.[0]) { updateFields.image_url = pb.images[0].url_list[0]; hasUpdate = true; }
-      if (data?.seller?.name) { updateFields.seller_name = data.seller.name; hasUpdate = true; }
-      if (data?.seller?.seller_id) { updateFields.seller_id = data.seller.seller_id; hasUpdate = true; }
+      if (read.title) { updateFields.title = read.title; hasUpdate = true; }
+      if (read.imageUrl) { updateFields.image_url = read.imageUrl; hasUpdate = true; }
+      if (read.sellerName) { updateFields.seller_name = read.sellerName; hasUpdate = true; }
+      if (read.sellerId) { updateFields.seller_id = String(read.sellerId); hasUpdate = true; }
 
       if (hasUpdate) {
         const { error: updateErr } = await supabase
@@ -1781,6 +1835,9 @@ async function main() {
   console.log(`  Phase 4 — Revived (flag cleared): ${stats.phase4_revived}`);
   console.log(`  Phase 5 — Thumbnails refreshed: ${stats.phase5_thumbnails}`);
   console.log(`  API failures:                   ${stats.api_failures} (402 / credit wall: ${stats.api_402})`);
+  if (stats.phase3_failure) {
+    console.log(`  Phase 3 — FAILED:               ${stats.phase3_failure}`);
+  }
   console.log(`\n  Total time: ${elapsed}s`);
 
   // A credit wall silently zeroes every phase above. Make it impossible to miss.

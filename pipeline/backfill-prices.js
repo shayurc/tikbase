@@ -29,6 +29,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { recordDead404s, clearStrikes, STRIKES_TO_FLAG } from "./price-strikes.js";
+import { readProductResponse } from "./product-response.js";
 
 const SCRAPECREATORS_API_KEY = process.env.SCRAPECREATORS_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
@@ -77,30 +78,24 @@ async function apiFetchRaw(productId) {
   }
 }
 
-// Extraction uses the CURRENT, verified Phase 4 paths (product_base.* top-level).
+// Extraction goes through product-response.js, the one place that knows the
+// vendor's response layout (it moved under product_info in 2026).
 // Returns the fields to update, or null if no usable price was found.
 function extractFields(data) {
-  const price =
-    data?.product_base?.price?.min_sku_price ??
-    data?.data?.product_base?.price?.min_sku_price ??
-    null;
-  const pb = data?.product_base;
+  const read = readProductResponse(data);
   const fields = { updated_at: new Date().toISOString() };
   let hasPrice = false;
 
-  if (price != null && parseFloat(String(price).replace(/[^0-9.]/g, "")) > 0) {
-    fields.sale_price = parseFloat(String(price).replace(/[^0-9.]/g, ""));
+  if (read.minSkuPrice != null) {
+    fields.sale_price = read.minSkuPrice;
     hasPrice = true;
   }
-  if (pb?.price?.original_price) {
-    const op = parseFloat(String(pb.price.original_price).replace(/[^0-9.]/g, ""));
-    if (op > 0) fields.original_price = op;
-  }
-  if (pb?.sold_count != null && pb.sold_count > 0) fields.sold_count = pb.sold_count;
-  if (pb?.title) fields.title = pb.title;
-  if (pb?.images?.[0]?.url_list?.[0]) fields.image_url = pb.images[0].url_list[0];
-  if (data?.seller?.name) fields.seller_name = data.seller.name;
-  if (data?.seller?.seller_id) fields.seller_id = data.seller.seller_id;
+  if (read.originalPrice != null) fields.original_price = read.originalPrice;
+  if (read.soldCount != null && read.soldCount > 0) fields.sold_count = read.soldCount;
+  if (read.title) fields.title = read.title;
+  if (read.imageUrl) fields.image_url = read.imageUrl;
+  if (read.sellerName) fields.seller_name = read.sellerName;
+  if (read.sellerId) fields.seller_id = String(read.sellerId);
 
   return hasPrice ? fields : null;
 }
