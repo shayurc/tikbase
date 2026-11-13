@@ -11,6 +11,7 @@ import verifySessionHandler from "../api/verify-session";
 import createPortalSessionHandler from "../api/create-portal-session";
 import avatarHandler from "../api/avatar";
 import thumbHandler from "../api/thumb";
+import deleteAccountHandler from "../api/delete-account";
 import creatorSearchHandler from "../api/creator-search";
 import creatorProfileHandler from "../api/creator-profile";
 import productSearchHandler from "../api/product-search";
@@ -325,6 +326,16 @@ export async function registerRoutes(
     } catch (err: any) {
       console.error("video-transcript (proxy) error:", err?.message);
       if (!res.headersSent) res.status(500).json({ error: "Failed to load transcript" });
+    }
+  });
+
+  // ---- Delete account ----
+  app.post("/api/delete-account", async (req, res) => {
+    try {
+      await deleteAccountHandler(req as any, res as any);
+    } catch (err: any) {
+      console.error("delete-account (proxy) error:", err?.message);
+      if (!res.headersSent) res.status(500).json({ error: "delete_failed" });
     }
   });
 

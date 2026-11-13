@@ -26,6 +26,9 @@ import SettingsPage from "@/pages/settings";
 import LandingPage from "@/pages/landing";
 import LoginPage from "@/pages/login";
 import SignupPage from "@/pages/signup";
+import ForgotPasswordPage from "@/pages/forgot-password";
+import ResetPasswordPage from "@/pages/reset-password";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import SubscriptionSuccessPage from "@/pages/subscription-success";
 import NotFound from "@/pages/not-found";
 import { MaintenanceScreen } from "@/components/MaintenanceScreen";
@@ -90,24 +93,33 @@ function DashboardLayout() {
           <GlobalSearch />
         </header>
 
+        {/* Routes take the page as a CHILD, not as `component={() => ...}`.
+            The inline arrow was a new component type on every render of this
+            layout, so opening the phone menu (a state change here) unmounted
+            and remounted the page underneath: filters, page number and scroll
+            position reset, and the data was fetched again. */}
+        {/* Keyed on the route: a page that throws shows a message in place
+            of itself, and navigating away clears it. */}
+        <ErrorBoundary resetKey={location}>
         <Switch>
-          <Route path="/dashboard" component={() => <ProtectedRoute component={VideosPage} />} />
-          <Route path="/dashboard/overview" component={() => <ProtectedRoute component={OverviewPage} />} />
-          <Route path="/dashboard/products" component={() => <ProtectedRoute component={ProductsPage} />} />
-          <Route path="/dashboard/creators" component={() => <ProtectedRoute component={CreatorsPage} />} />
+          <Route path="/dashboard"><ProtectedRoute component={VideosPage} /></Route>
+          <Route path="/dashboard/overview"><ProtectedRoute component={OverviewPage} /></Route>
+          <Route path="/dashboard/products"><ProtectedRoute component={ProductsPage} /></Route>
+          <Route path="/dashboard/creators"><ProtectedRoute component={CreatorsPage} /></Route>
           {/* Before nothing else — :key is URL-encoded ('id%3A<digits>' for the
               numeric half of the creator universe). */}
-          <Route path="/dashboard/creator/:key" component={() => <ProtectedRoute component={CreatorProfilePage} />} />
-          <Route path="/dashboard/product/:id" component={() => <ProtectedRoute component={ProductDetailPage} />} />
+          <Route path="/dashboard/creator/:key"><ProtectedRoute component={CreatorProfilePage} /></Route>
+          <Route path="/dashboard/product/:id"><ProtectedRoute component={ProductDetailPage} /></Route>
           {/* :sellerId is URL-encoded — it is either a numeric seller id or
               'name:<shop>', and shop names contain spaces and slashes. */}
-          <Route path="/dashboard/brand/:sellerId" component={() => <ProtectedRoute component={BrandProfilePage} />} />
-          <Route path="/dashboard/saved" component={() => <ProtectedRoute component={SavedPage} />} />
-          <Route path="/dashboard/plans" component={() => <ProtectedRoute component={PlansPage} />} />
-          <Route path="/dashboard/billing" component={() => <ProtectedRoute component={BillingPage} />} />
-          <Route path="/dashboard/settings" component={() => <ProtectedRoute component={SettingsPage} />} />
+          <Route path="/dashboard/brand/:sellerId"><ProtectedRoute component={BrandProfilePage} /></Route>
+          <Route path="/dashboard/saved"><ProtectedRoute component={SavedPage} /></Route>
+          <Route path="/dashboard/plans"><ProtectedRoute component={PlansPage} /></Route>
+          <Route path="/dashboard/billing"><ProtectedRoute component={BillingPage} /></Route>
+          <Route path="/dashboard/settings"><ProtectedRoute component={SettingsPage} /></Route>
           <Route component={NotFound} />
         </Switch>
+        </ErrorBoundary>
       </main>
     </div>
   );
@@ -128,11 +140,18 @@ function PublicRoute({ component: Component }: { component: React.ComponentType 
 }
 
 function AppRouter() {
+  // A reset email returns to `/#access_token=...&type=recovery`. The hash
+  // router would read that as a path and show the 404, so recovery is decided
+  // above the router, from the auth state, and replaces it until it is done.
+  const { recovering } = useAuth();
+  if (recovering) return <ResetPasswordPage />;
+
   return (
     <Switch>
       <Route path="/" component={RootRedirect} />
-      <Route path="/login" component={() => <PublicRoute component={LoginPage} />} />
-      <Route path="/signup" component={() => <PublicRoute component={SignupPage} />} />
+      <Route path="/login"><PublicRoute component={LoginPage} /></Route>
+      <Route path="/signup"><PublicRoute component={SignupPage} /></Route>
+      <Route path="/forgot-password"><PublicRoute component={ForgotPasswordPage} /></Route>
       <Route path="/subscription-success" component={SubscriptionSuccessPage} />
       {/* '/dashboard/*', not '/dashboard/:rest*': the named-param form matches a
           SINGLE trailing segment, which was invisible while every dashboard page
@@ -164,7 +183,10 @@ function App() {
               <Toaster />
               <PaywallModal />
               <Router hook={useHashLocation}>
-                <AppRouter />
+                {/* Last resort for anything outside the dashboard shell. */}
+                <ErrorBoundary>
+                  <AppRouter />
+                </ErrorBoundary>
               </Router>
             </SubscriptionProvider>
           </BookmarkProvider>
